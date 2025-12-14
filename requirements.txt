@@ -1,0 +1,21 @@
+# RAG система для научных статей
+
+# PDF обработка
+PyMuPDF>=1.24.0
+
+# Эмбеддинги и ML
+sentence-transformers>=3.0.0
+torch>=2.0.0
+
+# Векторная база данных
+chromadb>=0.5.0
+
+# Разбиение текста
+langchain-text-splitters>=0.2.0
+
+# LLM интеграция (для query.py)
+langchain-openai>=0.1.0
+langchain-core>=0.2.0
+
+# UI
+rich>=13.0.0
