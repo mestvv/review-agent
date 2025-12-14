@@ -218,5 +218,6 @@ __marimo__/
 articles/
 .cursor/
 chunks_log/
+responses_log/
 chroma_db/
 .DS_Store

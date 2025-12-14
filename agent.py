@@ -43,6 +43,7 @@ from config import (
     CHROMA_DB_PATH,
     COLLECTION_NAME,
     CHUNKS_LOG_DIR,
+    RESPONSES_LOG_DIR,
     LLM_MODEL,
     LLM_BASE_URL,
     LLM_API_KEY,
@@ -60,6 +61,7 @@ llm = ChatOpenAI(
     base_url=LLM_BASE_URL,
     api_key=LLM_API_KEY,
     temperature=LLM_TEMPERATURE,
+    extra_body={"thinking": {"type": "enabled"}},
 )
 
 
@@ -149,6 +151,84 @@ def save_chunks_to_json(
         json.dump(data, f, ensure_ascii=False, indent=2)
 
     logger.info(f"💾 Чанки сохранены в {filepath}")
+
+
+def serialize_response(response) -> dict:
+    """
+    Сериализует объект ответа LLM (AIMessage) в словарь для JSON.
+
+    Args:
+        response: Объект ответа от LLM
+
+    Returns:
+        Словарь с данными ответа
+    """
+    # Если это объект с методом dict() (LangChain сообщения)
+    if hasattr(response, "dict"):
+        return response.dict()
+    # Если это объект с методом model_dump() (Pydantic v2)
+    elif hasattr(response, "model_dump"):
+        return response.model_dump()
+    # Если это объект с __dict__
+    elif hasattr(response, "__dict__"):
+        result = {}
+        for key, value in response.__dict__.items():
+            # Рекурсивно сериализуем вложенные объекты
+            if hasattr(value, "dict"):
+                result[key] = value.dict()
+            elif hasattr(value, "model_dump"):
+                result[key] = value.model_dump()
+            elif hasattr(value, "__dict__"):
+                result[key] = serialize_response(value)
+            else:
+                result[key] = value
+        return result
+    # Если это уже словарь или примитив
+    else:
+        return response
+
+
+def save_response_to_json(query, response) -> None:
+    """
+    Сохраняет полный ответ LLM в JSON файл со всеми служебными полями.
+
+    Args:
+        query: Исходный запрос (строка или словарь)
+        response: Полный объект ответа от LLM (AIMessage)
+    """
+    # Создаём директорию для логов, если её нет
+    RESPONSES_LOG_DIR.mkdir(exist_ok=True)
+
+    # Формируем имя файла с timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Извлекаем строку для имени файла
+    if isinstance(query, dict):
+        # Берём "question" или "topic" из словаря
+        query_str = query.get("question") or query.get("topic") or str(query)
+    else:
+        query_str = query
+
+    # Очищаем query для имени файла (убираем спецсимволы)
+    safe_query = re.sub(r"[^\w\s-]", "", str(query_str)[:50]).strip().replace(" ", "_")
+    filename = f"response_{timestamp}_{safe_query}.json"
+    filepath = RESPONSES_LOG_DIR / filename
+
+    # Сериализуем response в словарь
+    response_dict = serialize_response(response)
+
+    # Формируем данные для сохранения
+    data = {
+        "query": query,
+        "response": response_dict,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    # Сохраняем в JSON
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+
+    logger.info(f"💾 Ответ сохранён в {filepath}")
 
 
 def retrieve_chunks(
@@ -363,6 +443,10 @@ class LiteratureAgent:
             {"question": question, "context": context}
         )
 
+        save_response_to_json(
+            query={"question": question, "context": context}, response=response
+        )
+
         self._print_answer("Ответ на вопрос", response.content, chunks)
 
     def review_topic(
@@ -413,6 +497,15 @@ class LiteratureAgent:
                 "context": context[:8000],  # Ограничиваем контекст
                 "sources": "\n".join(sources_detail),
             }
+        )
+
+        save_response_to_json(
+            query={
+                "topic": topic,
+                "context": context[:8000],  # Ограничиваем контекст
+                "sources": "\n".join(sources_detail),
+            },
+            response=response,
         )
 
         self._print_answer("Обзор литературы", response.content, all_chunks)
@@ -665,12 +758,12 @@ if __name__ == "__main__":
     agent = LiteratureAgent(llm)
 
     # Пример: ответ на вопрос
-    # agent.answer_question(
-    #     "Какова средняя скорость глобального потепления?",
-    #     n_results=5,
-    # )
+    agent.answer_question(
+        "Какова средняя скорость глобального потепления?",
+        n_results=5,
+    )
     # agent.answer_question(
     #     "Как изменяется среднегодовая температуры воздуха и среднегодовая температура горных пород на глубине 1 и 4 м?",
     #     n_results=5,
     # )
-    agent.review_topic("Устойчивость зданий и инженерных сооружений")
+    # agent.review_topic("Устойчивость зданий и инженерных сооружений")
