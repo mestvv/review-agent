@@ -421,11 +421,13 @@ def create_chunks_with_metadata(page_chunks: list[dict]) -> list[Chunk]:
 
 
 def save_parsed_file(file_path: str, md_text: str) -> None:
-    """Сохраняет результат парсинга PDF в parsed_files_logs."""
+    """Сохраняет результат парсинга файла в parsed_files_logs."""
     # Создаем директорию parsed_logs, если она не существует
     PARSED_FILES_LOGS_DIR.mkdir(exist_ok=True)
 
-    log_file_name = f"{file_path.replace('.pdf', '')}_parsed.md"
+    # Удаляем расширение (.pdf или .md)
+    base_name = file_path.replace(".pdf", "").replace(".md", "")
+    log_file_name = f"{base_name}_parsed.md"
     log_file_path = PARSED_FILES_LOGS_DIR / log_file_name
 
     pathlib.Path(log_file_path).write_bytes(md_text.encode())
@@ -433,11 +435,56 @@ def save_parsed_file(file_path: str, md_text: str) -> None:
     print(f"     Парсинг сохранен: {log_file_path}")
 
 
-def index_pdf(file_path: Path, db_name: str) -> int:
-    """Индексирует один PDF файл в указанную БД.
+def parse_markdown_file(file_path: Path) -> list[dict]:
+    """Парсит Markdown файл в формат, аналогичный pymupdf4llm.
 
     Args:
-        file_path: Путь к PDF файлу
+        file_path: Путь к MD файлу
+
+    Returns:
+        Список словарей с текстом и метаданными
+    """
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Разбиваем по заголовкам первого уровня или по размеру (имитация страниц)
+    # Для MD файлов "страница" = примерно 3000 символов или заголовок первого уровня
+    chunks = []
+    current_chunk = ""
+    page_num = 1
+
+    lines = content.split("\n")
+    for line in lines:
+        # Если встречаем заголовок первого уровня и уже есть текст, создаем новую "страницу"
+        if line.startswith("# ") and current_chunk.strip():
+            chunks.append(
+                {"text": current_chunk.strip(), "metadata": {"page": page_num}}
+            )
+            page_num += 1
+            current_chunk = line + "\n"
+        else:
+            current_chunk += line + "\n"
+
+            # Если чанк стал слишком большим, разбиваем
+            if len(current_chunk) > 3000:
+                chunks.append(
+                    {"text": current_chunk.strip(), "metadata": {"page": page_num}}
+                )
+                page_num += 1
+                current_chunk = ""
+
+    # Добавляем последний чанк
+    if current_chunk.strip():
+        chunks.append({"text": current_chunk.strip(), "metadata": {"page": page_num}})
+
+    return chunks if chunks else [{"text": content, "metadata": {"page": 1}}]
+
+
+def index_file(file_path: Path, db_name: str) -> int:
+    """Индексирует файл (PDF или MD) в указанную БД.
+
+    Args:
+        file_path: Путь к файлу
         db_name: Имя базы данных
 
     Returns:
@@ -446,6 +493,7 @@ def index_pdf(file_path: Path, db_name: str) -> int:
     file_path = Path(file_path)
     file_hash = get_file_hash(file_path)
     file_name = file_path.name
+    file_ext = file_path.suffix.lower()
     collection = _get_collection(db_name)
 
     existing = collection.get(where={"file_hash": file_hash})
@@ -454,8 +502,14 @@ def index_pdf(file_path: Path, db_name: str) -> int:
         return 0
 
     try:
-        # Получаем чанки по страницам с метаданными
-        page_chunks = pymupdf4llm.to_markdown(str(file_path), page_chunks=True)
+        # Парсим файл в зависимости от типа
+        if file_ext == ".pdf":
+            page_chunks = pymupdf4llm.to_markdown(str(file_path), page_chunks=True)
+        elif file_ext == ".md":
+            page_chunks = parse_markdown_file(file_path)
+        else:
+            print(f"[WARN] {file_name} — неподдерживаемый формат: {file_ext}")
+            return 0
 
         # Сохраняем полный текст для логирования
         full_md_text = "\n\n".join([page.get("text", "") for page in page_chunks])
@@ -504,15 +558,22 @@ def index_pdf(file_path: Path, db_name: str) -> int:
     # Определяем количество страниц
     total_pages = len(page_chunks)
     section_info = ", ".join(f"{k}: {v}" for k, v in sorted(sections.items()))
-    print(f"[OK] {file_name}")
+    file_type = "PDF" if file_ext == ".pdf" else "MD"
+    print(f"[OK] {file_name} ({file_type})")
     print(f"     Чанков: {len(chunks)} | Страниц: {total_pages}")
     print(f"     Секции: {section_info}")
 
     return len(chunks)
 
 
+# Для обратной совместимости
+def index_pdf(file_path: Path, db_name: str) -> int:
+    """Индексирует PDF файл (устаревшая функция, используйте index_file)."""
+    return index_file(file_path, db_name)
+
+
 def index_all_pdfs(db_name: Optional[str] = None) -> None:
-    """Индексирует все PDF из папки articles.
+    """Индексирует все файлы (PDF и MD) из папки articles.
 
     Args:
         db_name: Имя БД (поддиректория в articles/). Если None, индексирует все доступные БД.
@@ -525,7 +586,7 @@ def index_all_pdfs(db_name: Optional[str] = None) -> None:
         available_dbs = list_available_dbs()
         if not available_dbs:
             print(f"Нет поддиректорий в папке {ARTICLES_DIR}")
-            print("Создайте поддиректории и поместите в них PDF файлы")
+            print("Создайте поддиректории и поместите в них PDF/MD файлы")
             return
 
         print(f"{'=' * 60}")
@@ -538,27 +599,31 @@ def index_all_pdfs(db_name: Optional[str] = None) -> None:
 
 
 def _index_db(db_name: str) -> None:
-    """Индексирует одну БД (все PDF из соответствующей директории)."""
+    """Индексирует одну БД (все PDF и MD файлы из соответствующей директории)."""
     articles_subdir = get_articles_subdir(db_name)
 
     if not articles_subdir.exists():
         print(f"[ERROR] Директория {articles_subdir} не существует")
         return
 
+    # Собираем все PDF и MD файлы
     pdf_files = sorted(articles_subdir.glob("*.pdf"))
-    if not pdf_files:
-        print(f"[WARN] Нет PDF файлов в папке {articles_subdir}")
+    md_files = sorted(articles_subdir.glob("*.md"))
+    all_files = pdf_files + md_files
+
+    if not all_files:
+        print(f"[WARN] Нет PDF/MD файлов в папке {articles_subdir}")
         return
 
     print(f"{'=' * 60}")
     print(f"База данных: {db_name}")
     print(f"Директория: {articles_subdir}")
-    print(f"Найдено {len(pdf_files)} PDF файлов")
+    print(f"Найдено {len(pdf_files)} PDF файлов, {len(md_files)} MD файлов")
     print(f"{'=' * 60}\n")
 
     total_chunks = 0
-    for pdf_file in pdf_files:
-        total_chunks += index_pdf(pdf_file, db_name)
+    for file_path in all_files:
+        total_chunks += index_file(file_path, db_name)
         print()
 
     collection = _get_collection(db_name)
@@ -719,17 +784,24 @@ def list_dbs() -> None:
 
     if not available and not existing:
         print("Нет баз данных.")
-        print("Создайте поддиректории в папке articles/ и поместите в них PDF файлы")
+        print("Создайте поддиректории в папке articles/ и поместите в них PDF/MD файлы")
     else:
         if available:
-            print("\nДиректории с PDF файлами (готовы к индексации):")
+            print("\nДиректории с файлами (готовы к индексации):")
             for db in available:
                 articles_subdir = get_articles_subdir(db)
                 pdf_count = len(list(articles_subdir.glob("*.pdf")))
+                md_count = len(list(articles_subdir.glob("*.md")))
+                file_types = []
+                if pdf_count:
+                    file_types.append(f"{pdf_count} PDF")
+                if md_count:
+                    file_types.append(f"{md_count} MD")
+                files_str = ", ".join(file_types) if file_types else "0 файлов"
                 indexed = (
                     "✓ проиндексирована" if db in existing else "○ не проиндексирована"
                 )
-                print(f"  • {db} ({pdf_count} PDF) — {indexed}")
+                print(f"  • {db} ({files_str}) — {indexed}")
 
         if existing:
             print("\nСуществующие БД:")
