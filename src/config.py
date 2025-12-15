@@ -1,8 +1,9 @@
 """Конфигурация приложения."""
 
-from pathlib import Path
-from dotenv import load_dotenv
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -13,6 +14,7 @@ COLLECTION_NAME = "literature_review"
 CHUNKS_LOG_DIR = Path("./chunks_log")
 RESPONSES_LOG_DIR = Path("./responses_log")
 LATEX_OUTPUT_DIR = Path("./latex_output")
+PARSED_FILES_LOGS_DIR = Path("./parsed_files_logs")
 
 # Chunking параметры
 CHUNK_SIZE = 600
