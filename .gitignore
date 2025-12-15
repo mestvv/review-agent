@@ -220,4 +220,5 @@ articles/
 chunks_log/
 responses_log/
 chroma_db/
+latex_output/
 .DS_Store
