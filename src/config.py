@@ -9,20 +9,77 @@ load_dotenv()
 
 # Директории
 ARTICLES_DIR = Path("articles")
-CHROMA_DB_PATH = "./chroma_db"
+CHROMA_DB_BASE_PATH = "./chroma_db"  # Базовая директория для всех БД
 COLLECTION_NAME = "literature_review"
 CHUNKS_LOG_DIR = Path("./chunks_log")
 RESPONSES_LOG_DIR = Path("./responses_log")
 LATEX_OUTPUT_DIR = Path("./latex_output")
 PARSED_FILES_LOGS_DIR = Path("./parsed_files_logs")
 
+
+def get_db_path(db_name: str) -> str:
+    """Получить путь к БД для конкретной директории.
+
+    Args:
+        db_name: Имя директории внутри articles/
+
+    Returns:
+        Путь к БД ChromaDB
+    """
+    return f"{CHROMA_DB_BASE_PATH}/{db_name}"
+
+
+def get_articles_subdir(db_name: str) -> Path:
+    """Получить путь к поддиректории articles.
+
+    Args:
+        db_name: Имя директории внутри articles/
+
+    Returns:
+        Путь к директории
+    """
+    return ARTICLES_DIR / db_name
+
+
+def list_available_dbs() -> list[str]:
+    """Получить список доступных баз данных (поддиректорий в articles/).
+
+    Returns:
+        Список имён директорий
+    """
+    if not ARTICLES_DIR.exists():
+        return []
+
+    # Получаем все директории в articles/
+    subdirs = [d.name for d in ARTICLES_DIR.iterdir() if d.is_dir()]
+    return sorted(subdirs)
+
+
+def list_existing_dbs() -> list[str]:
+    """Получить список существующих баз данных.
+
+    Returns:
+        Список имён БД
+    """
+    base_path = Path(CHROMA_DB_BASE_PATH)
+    if not base_path.exists():
+        return []
+
+    # Получаем все директории в chroma_db/
+    dbs = [d.name for d in base_path.iterdir() if d.is_dir()]
+    return sorted(dbs)
+
+
+# Для обратной совместимости (если нет поддиректорий)
+CHROMA_DB_PATH = CHROMA_DB_BASE_PATH
+
 # Chunking параметры
-CHUNK_SIZE = 600
-CHUNK_OVERLAP = 120
+CHUNK_SIZE = 800  # Увеличено с 600 для лучшего контекста
+CHUNK_OVERLAP = 200  # Увеличено с 120 для перекрытия
 MIN_CHUNK_LENGTH = 100
 
 # Модели
-SENTENCE_TRANSFORMER_MODEL = "mlsa-iai-msu-lab/sci-rus-tiny"
+SENTENCE_TRANSFORMER_MODEL = "sentence-transformers/all-mpnet-base-v2"
 
 # Reranker
 RERANKER_MODEL = os.getenv(
@@ -30,6 +87,11 @@ RERANKER_MODEL = os.getenv(
 )
 RERANKER_TOP_K = 10
 USE_RERANKER = os.getenv("USE_RERANKER", "true").lower() == "true"
+
+# Retrieval параметры
+INITIAL_FETCH_COUNT = int(
+    os.getenv("INITIAL_FETCH_COUNT", "40")
+)  # Увеличено с 10 до 40
 
 # LLM
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-r1-0528-qwen3-8b")

@@ -214,14 +214,22 @@ def _print_sources_table(chunks: list[RetrievedChunk]) -> None:
 
 def answer_question(
     question: str,
+    db_name: str,
     n_results: int = 5,
     expand_context: bool = True,
 ) -> None:
-    """Отвечает на научный вопрос с цитированием."""
+    """Отвечает на научный вопрос с цитированием.
+    
+    Args:
+        question: Вопрос для ответа
+        db_name: Имя базы данных для поиска
+        n_results: Количество результатов
+        expand_context: Расширять контекст соседними чанками
+    """
     llm = create_llm()
 
     initial_chunks, query_type, confidence = retrieve_with_reranking(
-        question, n_results, fetch_multiplier=2
+        question, db_name, n_results, fetch_multiplier=2
     )
 
     if not initial_chunks:
@@ -233,7 +241,7 @@ def answer_question(
     if expand_context:
         seen_ids = {f"{c.file_hash}_{c.chunk_id}" for c in initial_chunks}
         for chunk in initial_chunks[:3]:
-            neighbors = get_neighbor_chunks(chunk, window=1)
+            neighbors = get_neighbor_chunks(chunk, db_name, window=1)
             for n in neighbors:
                 key = f"{n.file_hash}_{n.chunk_id}"
                 if key not in seen_ids:
@@ -277,10 +285,18 @@ def answer_question(
 
 def review_topic(
     topic: str,
+    db_name: str,
     n_results: int = 15,
     sections: Optional[list[str]] = None,
 ) -> None:
-    """Генерирует обзор литературы по теме."""
+    """Генерирует обзор литературы по теме.
+    
+    Args:
+        topic: Тема для обзора
+        db_name: Имя базы данных для поиска
+        n_results: Количество результатов
+        sections: Список секций для фильтрации (опционально)
+    """
     llm = create_llm()
     query_type = detect_query_type(topic)
 
@@ -288,12 +304,12 @@ def review_topic(
         all_chunks = []
         for section in sections:
             chunks, _, _ = retrieve_with_reranking(
-                topic, n_results // len(sections), section_filter=section
+                topic, db_name, n_results // len(sections), section_filter=section
             )
             all_chunks.extend(chunks)
     else:
         all_chunks, query_type, confidence = retrieve_with_reranking(
-            topic, n_results, fetch_multiplier=2
+            topic, db_name, n_results, fetch_multiplier=2
         )
 
     if not all_chunks:
@@ -344,11 +360,19 @@ def review_topic(
 
 def search_chunks(
     query: str,
+    db_name: str,
     n_results: int = 10,
     section: Optional[str] = None,
 ) -> None:
-    """Поиск и отображение чанков (без LLM)."""
-    chunks = retrieve_chunks(query, n_results, section)
+    """Поиск и отображение чанков (без LLM).
+    
+    Args:
+        query: Поисковый запрос
+        db_name: Имя базы данных для поиска
+        n_results: Количество результатов
+        section: Фильтр по секции (опционально)
+    """
+    chunks = retrieve_chunks(query, db_name, n_results, section)
 
     if not chunks:
         console.print("[red]Ничего не найдено.[/red]")

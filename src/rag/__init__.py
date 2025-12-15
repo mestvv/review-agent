@@ -5,6 +5,7 @@ from src.rag.indexer import (
     index_all_pdfs,
     clear_database,
     show_stats,
+    list_dbs,
 )
 from src.rag.retriever import (
     retrieve_chunks,
@@ -22,6 +23,7 @@ __all__ = [
     "index_all_pdfs",
     "clear_database",
     "show_stats",
+    "list_dbs",
     "retrieve_chunks",
     "retrieve_with_reranking",
     "get_neighbor_chunks",

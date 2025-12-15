@@ -9,7 +9,6 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 
 from src.config import (
-    CHROMA_DB_PATH,
     COLLECTION_NAME,
     SENTENCE_TRANSFORMER_MODEL,
     SECTION_WEIGHTS,
@@ -19,13 +18,16 @@ from src.config import (
     RERANKER_MODEL,
     RERANKER_TOP_K,
     USE_RERANKER,
+    INITIAL_FETCH_COUNT,
+    get_db_path,
 )
 
 logger = logging.getLogger(__name__)
 
 # Глобальные компоненты
 _embedding_model = None
-_collection = None
+_clients = {}  # Словарь для хранения клиентов для разных БД
+_collections = {}  # Словарь для хранения коллекций для разных БД
 _reranker_model = None
 
 
@@ -36,12 +38,16 @@ def _get_embedding_model():
     return _embedding_model
 
 
-def _get_collection():
-    global _collection
-    if _collection is None:
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        _collection = client.get_or_create_collection(COLLECTION_NAME)
-    return _collection
+def _get_collection(db_name: str):
+    """Получить коллекцию для указанной БД."""
+    global _clients, _collections
+    if db_name not in _collections:
+        db_path = get_db_path(db_name)
+        _clients[db_name] = chromadb.PersistentClient(path=db_path)
+        _collections[db_name] = _clients[db_name].get_or_create_collection(
+            name=COLLECTION_NAME
+        )
+    return _collections[db_name]
 
 
 def _get_reranker():
@@ -132,14 +138,25 @@ def detect_query_type(query: str) -> str:
 
 def retrieve_chunks(
     query: str,
+    db_name: str,
     n_results: int = 5,
     section_filter: Optional[str] = None,
 ) -> list[RetrievedChunk]:
-    """Извлекает релевантные чанки из базы."""
-    logger.info(f"🔍 Поиск: '{query[:60]}...'")
+    """Извлекает релевантные чанки из базы.
+    
+    Args:
+        query: Поисковый запрос
+        db_name: Имя базы данных
+        n_results: Количество результатов
+        section_filter: Фильтр по секции (опционально)
+        
+    Returns:
+        Список извлеченных чанков
+    """
+    logger.info(f"🔍 Поиск в БД '{db_name}': '{query[:60]}...'")
 
     model = _get_embedding_model()
-    collection = _get_collection()
+    collection = _get_collection(db_name)
 
     embedding = model.encode([query]).tolist()
     where_filter = {"section": section_filter} if section_filter else None
@@ -174,9 +191,20 @@ def retrieve_chunks(
     return chunks
 
 
-def get_neighbor_chunks(chunk: RetrievedChunk, window: int = 1) -> list[RetrievedChunk]:
-    """Извлекает соседние чанки для расширения контекста."""
-    collection = _get_collection()
+def get_neighbor_chunks(
+    chunk: RetrievedChunk, db_name: str, window: int = 1
+) -> list[RetrievedChunk]:
+    """Извлекает соседние чанки для расширения контекста.
+    
+    Args:
+        chunk: Чанк, для которого ищем соседей
+        db_name: Имя базы данных
+        window: Размер окна (количество соседних чанков с каждой стороны)
+        
+    Returns:
+        Список соседних чанков
+    """
+    collection = _get_collection(db_name)
     neighbor_ids = [
         f"{chunk.file_hash}_{chunk.chunk_id + offset}"
         for offset in range(-window, window + 1)
@@ -356,16 +384,29 @@ def calculate_confidence(
 
 def retrieve_with_reranking(
     query: str,
+    db_name: str,
     n_results: int = 5,
     section_filter: Optional[str] = None,
     fetch_multiplier: int = 3,
 ) -> tuple[list[RetrievedChunk], str, ConfidenceScore]:
-    """Извлекает чанки с re-ranking."""
+    """Извлекает чанки с re-ranking.
+    
+    Args:
+        query: Поисковый запрос
+        db_name: Имя базы данных
+        n_results: Количество результатов после re-ranking
+        section_filter: Фильтр по секции (опционально)
+        fetch_multiplier: Множитель для первичной выборки
+        
+    Returns:
+        Кортеж из списка чанков, типа запроса и оценки уверенности
+    """
     query_type = detect_query_type(query)
     logger.info(f"🎯 Тип запроса: {query_type}")
 
-    fetch_count = max(n_results * fetch_multiplier, RERANKER_TOP_K)
-    initial_chunks = retrieve_chunks(query, fetch_count, section_filter)
+    # Используем INITIAL_FETCH_COUNT как минимум, чтобы не пропустить релевантные чанки
+    fetch_count = max(n_results * fetch_multiplier, RERANKER_TOP_K, INITIAL_FETCH_COUNT)
+    initial_chunks = retrieve_chunks(query, db_name, fetch_count, section_filter)
 
     if not initial_chunks:
         return [], query_type, calculate_confidence([], query_type)

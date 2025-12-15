@@ -14,13 +14,15 @@ from sentence_transformers import SentenceTransformer
 
 from src.config import (
     ARTICLES_DIR,
-    CHROMA_DB_PATH,
     CHUNK_OVERLAP,
     CHUNK_SIZE,
     COLLECTION_NAME,
     MIN_CHUNK_LENGTH,
     PARSED_FILES_LOGS_DIR,
     SENTENCE_TRANSFORMER_MODEL,
+    get_db_path,
+    get_articles_subdir,
+    list_available_dbs,
 )
 
 GARBAGE_PATTERNS = [
@@ -38,8 +40,8 @@ GARBAGE_PATTERNS = [
 
 # Глобальные компоненты
 _model = None
-_client = None
-_collection = None
+_clients = {}  # Словарь для хранения клиентов для разных БД
+_collections = {}  # Словарь для хранения коллекций для разных БД
 _text_splitter = None
 
 
@@ -50,12 +52,16 @@ def _get_model():
     return _model
 
 
-def _get_collection():
-    global _client, _collection
-    if _collection is None:
-        _client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        _collection = _client.get_or_create_collection(name=COLLECTION_NAME)
-    return _collection
+def _get_collection(db_name: str):
+    """Получить коллекцию для указанной БД."""
+    global _clients, _collections
+    if db_name not in _collections:
+        db_path = get_db_path(db_name)
+        _clients[db_name] = chromadb.PersistentClient(path=db_path)
+        _collections[db_name] = _clients[db_name].get_or_create_collection(
+            name=COLLECTION_NAME
+        )
+    return _collections[db_name]
 
 
 def _get_text_splitter():
@@ -427,13 +433,20 @@ def save_parsed_file(file_path: str, md_text: str) -> None:
     print(f"     Парсинг сохранен: {log_file_path}")
 
 
-def index_pdf(file_path: Path) -> int:
-    """Индексирует один PDF файл."""
+def index_pdf(file_path: Path, db_name: str) -> int:
+    """Индексирует один PDF файл в указанную БД.
 
+    Args:
+        file_path: Путь к PDF файлу
+        db_name: Имя базы данных
+
+    Returns:
+        Количество проиндексированных чанков
+    """
     file_path = Path(file_path)
     file_hash = get_file_hash(file_path)
     file_name = file_path.name
-    collection = _get_collection()
+    collection = _get_collection(db_name)
 
     existing = collection.get(where={"file_hash": file_hash})
     if existing["ids"]:
@@ -498,43 +511,175 @@ def index_pdf(file_path: Path) -> int:
     return len(chunks)
 
 
-def index_all_pdfs() -> None:
-    """Индексирует все PDF из папки articles."""
-    pdf_files = sorted(ARTICLES_DIR.glob("*.pdf"))
-    if not pdf_files:
-        print(f"Нет PDF файлов в папке {ARTICLES_DIR}")
+def index_all_pdfs(db_name: Optional[str] = None) -> None:
+    """Индексирует все PDF из папки articles.
+
+    Args:
+        db_name: Имя БД (поддиректория в articles/). Если None, индексирует все доступные БД.
+    """
+    if db_name:
+        # Индексируем конкретную БД
+        _index_db(db_name)
+    else:
+        # Индексируем все доступные БД
+        available_dbs = list_available_dbs()
+        if not available_dbs:
+            print(f"Нет поддиректорий в папке {ARTICLES_DIR}")
+            print("Создайте поддиректории и поместите в них PDF файлы")
+            return
+
+        print(f"{'=' * 60}")
+        print(f"Найдено {len(available_dbs)} баз данных для индексации")
+        print(f"{'=' * 60}\n")
+
+        for db in available_dbs:
+            _index_db(db)
+            print()
+
+
+def _index_db(db_name: str) -> None:
+    """Индексирует одну БД (все PDF из соответствующей директории)."""
+    articles_subdir = get_articles_subdir(db_name)
+
+    if not articles_subdir.exists():
+        print(f"[ERROR] Директория {articles_subdir} не существует")
         return
 
-    print(f"{'=' * 50}")
+    pdf_files = sorted(articles_subdir.glob("*.pdf"))
+    if not pdf_files:
+        print(f"[WARN] Нет PDF файлов в папке {articles_subdir}")
+        return
+
+    print(f"{'=' * 60}")
+    print(f"База данных: {db_name}")
+    print(f"Директория: {articles_subdir}")
     print(f"Найдено {len(pdf_files)} PDF файлов")
-    print(f"{'=' * 50}\n")
+    print(f"{'=' * 60}\n")
 
     total_chunks = 0
     for pdf_file in pdf_files:
-        total_chunks += index_pdf(pdf_file)
+        total_chunks += index_pdf(pdf_file, db_name)
         print()
 
-    collection = _get_collection()
-    print(f"{'=' * 50}")
-    print(f"Всего в базе: {collection.count()} чанков")
-    print(f"{'=' * 50}")
+    collection = _get_collection(db_name)
+    print(f"{'=' * 60}")
+    print(f"База данных '{db_name}': {collection.count()} чанков")
+    print(f"{'=' * 60}")
 
 
-def clear_database() -> None:
-    """Очищает базу данных."""
-    global _collection
-    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-    client.delete_collection(COLLECTION_NAME)
-    _collection = client.get_or_create_collection(name=COLLECTION_NAME)
-    print("База данных очищена")
+def clear_database(db_name: Optional[str] = None) -> None:
+    """Очищает базу данных.
+
+    Args:
+        db_name: Имя БД для удаления. Если None, предлагает выбрать из списка.
+    """
+    global _clients, _collections
+
+    if db_name is None:
+        # Показываем список существующих БД для выбора
+        from src.config import list_existing_dbs
+
+        existing_dbs = list_existing_dbs()
+
+        if not existing_dbs:
+            print("Нет существующих баз данных")
+            return
+
+        print("\nСуществующие базы данных:")
+        for i, db in enumerate(existing_dbs, 1):
+            collection = _get_collection(db)
+            count = collection.count()
+            print(f"  {i}. {db} ({count} чанков)")
+
+        print(f"  {len(existing_dbs) + 1}. Все базы данных")
+        print("  0. Отмена")
+
+        try:
+            choice = int(input("\nВыберите номер БД для удаления: "))
+            if choice == 0:
+                print("Отменено")
+                return
+            elif choice == len(existing_dbs) + 1:
+                # Удалить все БД
+                for db in existing_dbs:
+                    _clear_db(db)
+                print("\nВсе базы данных очищены")
+                return
+            elif 1 <= choice <= len(existing_dbs):
+                db_name = existing_dbs[choice - 1]
+            else:
+                print("Неверный выбор")
+                return
+        except (ValueError, EOFError):
+            print("Неверный ввод")
+            return
+
+    _clear_db(db_name)
+    print(f"База данных '{db_name}' очищена")
 
 
-def show_stats() -> None:
-    """Показывает статистику базы."""
-    collection = _get_collection()
+def _clear_db(db_name: str) -> None:
+    """Очищает конкретную БД."""
+    global _clients, _collections
+
+    db_path = get_db_path(db_name)
+    client = chromadb.PersistentClient(path=db_path)
+
+    try:
+        client.delete_collection(COLLECTION_NAME)
+    except Exception:
+        pass  # Коллекция может не существовать
+
+    # Пересоздаем коллекцию
+    if db_name in _collections:
+        del _collections[db_name]
+    if db_name in _clients:
+        del _clients[db_name]
+
+    _collections[db_name] = client.get_or_create_collection(name=COLLECTION_NAME)
+
+
+def show_stats(db_name: Optional[str] = None) -> None:
+    """Показывает статистику базы.
+
+    Args:
+        db_name: Имя БД. Если None, показывает статистику по всем БД.
+    """
+    from src.config import list_existing_dbs
+
+    if db_name:
+        _show_db_stats(db_name)
+    else:
+        # Показываем статистику по всем БД
+        existing_dbs = list_existing_dbs()
+        if not existing_dbs:
+            print("Нет существующих баз данных")
+            return
+
+        print(f"\n{'=' * 60}")
+        print("СТАТИСТИКА ВСЕХ БАЗ ДАННЫХ")
+        print(f"{'=' * 60}\n")
+
+        total_chunks = 0
+        for db in existing_dbs:
+            collection = _get_collection(db)
+            count = collection.count()
+            total_chunks += count
+            print(f"База данных: {db}")
+            print(f"  Всего чанков: {count}")
+            print()
+
+        print(f"{'=' * 60}")
+        print(f"ВСЕГО ЧАНКОВ ВО ВСЕХ БАЗАХ: {total_chunks}")
+        print(f"{'=' * 60}\n")
+
+
+def _show_db_stats(db_name: str) -> None:
+    """Показывает детальную статистику одной БД."""
+    collection = _get_collection(db_name)
     total = collection.count()
     if total == 0:
-        print("База данных пуста")
+        print(f"База данных '{db_name}' пуста")
         return
 
     results = collection.get(include=["metadatas"])
@@ -548,9 +693,9 @@ def show_stats() -> None:
         files[fname] = files.get(fname, 0) + 1
         sections[section] = sections.get(section, 0) + 1
 
-    print(f"\n{'=' * 50}")
-    print("СТАТИСТИКА RAG БАЗЫ ДАННЫХ")
-    print(f"{'=' * 50}")
+    print(f"\n{'=' * 60}")
+    print(f"СТАТИСТИКА БД: {db_name}")
+    print(f"{'=' * 60}")
     print(f"Всего чанков: {total}")
     print("\nПо файлам:")
     for fname, count in sorted(files.items()):
@@ -558,4 +703,40 @@ def show_stats() -> None:
     print("\nПо секциям:")
     for section, count in sorted(sections.items()):
         print(f"  • {section}: {count} чанков")
-    print(f"{'=' * 50}\n")
+    print(f"{'=' * 60}\n")
+
+
+def list_dbs() -> None:
+    """Выводит список доступных и существующих баз данных."""
+    from src.config import list_existing_dbs
+
+    available = list_available_dbs()
+    existing = list_existing_dbs()
+
+    print(f"\n{'=' * 60}")
+    print("ДОСТУПНЫЕ БАЗЫ ДАННЫХ")
+    print(f"{'=' * 60}")
+
+    if not available and not existing:
+        print("Нет баз данных.")
+        print("Создайте поддиректории в папке articles/ и поместите в них PDF файлы")
+    else:
+        if available:
+            print("\nДиректории с PDF файлами (готовы к индексации):")
+            for db in available:
+                articles_subdir = get_articles_subdir(db)
+                pdf_count = len(list(articles_subdir.glob("*.pdf")))
+                indexed = (
+                    "✓ проиндексирована" if db in existing else "○ не проиндексирована"
+                )
+                print(f"  • {db} ({pdf_count} PDF) — {indexed}")
+
+        if existing:
+            print("\nСуществующие БД:")
+            for db in existing:
+                collection = _get_collection(db)
+                count = collection.count()
+                in_articles = "✓" if db in available else "✗ (директория удалена)"
+                print(f"  • {db} ({count} чанков) — {in_articles}")
+
+    print(f"{'=' * 60}\n")
