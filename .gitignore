@@ -223,4 +223,4 @@ chroma_db/
 latex_output/
 .DS_Store
 RAG-Challenge-2/
-parsed_logs/
+parsed_files_logs/
