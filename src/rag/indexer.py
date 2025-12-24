@@ -1,6 +1,7 @@
-"""Индексация PDF файлов в RAG базу."""
+"""Индексация PDF и DOCX файлов в RAG базу."""
 
 import hashlib
+import logging
 import pathlib
 import re
 from dataclasses import dataclass
@@ -9,6 +10,13 @@ from typing import Optional
 
 import chromadb
 import pymupdf4llm
+from docling.document_converter import (
+    DocumentConverter,
+    PdfFormatOption,
+    WordFormatOption,
+)
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 
@@ -24,6 +32,8 @@ from src.config import (
     get_articles_subdir,
     list_available_dbs,
 )
+
+logger = logging.getLogger(__name__)
 
 GARBAGE_PATTERNS = [
     r"^page\s*\d+\s*$",
@@ -43,6 +53,25 @@ _model = None
 _clients = {}  # Словарь для хранения клиентов для разных БД
 _collections = {}  # Словарь для хранения коллекций для разных БД
 _text_splitter = None
+_docling_converter = None
+
+
+def _get_docling_converter():
+    """Получить Docling конвертер с поддержкой формул."""
+    global _docling_converter
+    if _docling_converter is None:
+        # Настройка опций для PDF с поддержкой формул
+        pdf_options = PdfPipelineOptions()
+        pdf_options.do_formula_enrichment = True
+        pdf_options.do_table_structure = True
+
+        _docling_converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options),
+                InputFormat.DOCX: WordFormatOption(),
+            }
+        )
+    return _docling_converter
 
 
 def _get_model():
@@ -81,6 +110,7 @@ class Chunk:
     chunk_id: int
     page: int
     section: Optional[str] = None
+    is_table: bool = False
 
 
 def get_file_hash(file_path: Path) -> str:
@@ -341,6 +371,130 @@ def determine_chunk_section(
     return current_section
 
 
+@dataclass
+class TableWithContext:
+    """Таблица с контекстом (заголовком перед таблицей)."""
+
+    table_text: str
+    context: str  # Текст перед таблицей (заголовок)
+    start_pos: int  # Позиция начала таблицы в тексте
+    end_pos: int  # Позиция конца таблицы
+
+
+def extract_tables_with_context(text: str) -> list[TableWithContext]:
+    """Извлекает таблицы из Markdown текста с контекстом.
+
+    Markdown таблицы имеют формат:
+    | Header1 | Header2 |
+    |---------|---------|
+    | Cell1   | Cell2   |
+
+    Args:
+        text: Текст в Markdown формате
+
+    Returns:
+        Список таблиц с контекстом
+    """
+    tables = []
+    lines = text.split("\n")
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # Проверяем, является ли строка началом таблицы (содержит |)
+        if "|" in line and line.strip().startswith("|"):
+            table_start_line = i
+            table_lines = [line]
+
+            # Собираем контекст (предыдущие непустые строки до пустой строки)
+            context_lines = []
+            j = i - 1
+            while j >= 0 and lines[j].strip():
+                context_lines.insert(0, lines[j])
+                j -= 1
+
+            # Собираем все строки таблицы
+            i += 1
+            while i < len(lines) and "|" in lines[i]:
+                table_lines.append(lines[i])
+                i += 1
+
+            # Вычисляем позиции
+            start_pos = sum(len(lines[k]) + 1 for k in range(table_start_line))
+            end_pos = sum(len(lines[k]) + 1 for k in range(i))
+
+            table_text = "\n".join(table_lines)
+            context = "\n".join(context_lines)
+
+            tables.append(
+                TableWithContext(
+                    table_text=table_text,
+                    context=context,
+                    start_pos=start_pos,
+                    end_pos=end_pos,
+                )
+            )
+        else:
+            i += 1
+
+    return tables
+
+
+def split_text_preserving_tables(
+    text: str, text_splitter, tables: list[TableWithContext]
+) -> list[tuple[str, bool]]:
+    """Разбивает текст на части, сохраняя таблицы целиком.
+
+    Args:
+        text: Исходный текст
+        text_splitter: LangChain text splitter
+        tables: Список таблиц с контекстом
+
+    Returns:
+        Список кортежей (текст_чанка, is_table)
+    """
+    if not tables:
+        # Нет таблиц - стандартное разбиение
+        return [(chunk, False) for chunk in text_splitter.split_text(text)]
+
+    result = []
+    current_pos = 0
+
+    for table in sorted(tables, key=lambda t: t.start_pos):
+        # Текст до таблицы
+        text_before = text[current_pos : table.start_pos].strip()
+        if text_before:
+            # Разбиваем текст до таблицы стандартным способом
+            for chunk in text_splitter.split_text(text_before):
+                result.append((chunk, False))
+
+        # Создаём чанк с таблицей + контекст
+        table_chunk = ""
+        if table.context:
+            table_chunk = f"{table.context}\n\n{table.table_text}"
+        else:
+            table_chunk = table.table_text
+
+        # Проверяем размер таблицы
+        if len(table_chunk) > CHUNK_SIZE:
+            logger.warning(
+                f"[WARN] Таблица превышает CHUNK_SIZE ({len(table_chunk)} > {CHUNK_SIZE}). "
+                f"Сохраняется целиком для сохранения целостности данных."
+            )
+
+        result.append((table_chunk, True))
+        current_pos = table.end_pos
+
+    # Текст после последней таблицы
+    text_after = text[current_pos:].strip()
+    if text_after:
+        for chunk in text_splitter.split_text(text_after):
+            result.append((chunk, False))
+
+    return result
+
+
 def create_chunks_with_metadata(page_chunks: list[dict]) -> list[Chunk]:
     """Создает чанки из данных pymupdf4llm с метаданными страниц и секций.
 
@@ -390,13 +544,16 @@ def create_chunks_with_metadata(page_chunks: list[dict]) -> list[Chunk]:
             current_position += len(page_text) + 2
             continue
 
-        # Шаг 3: Разбиваем текст страницы на чанки
-        page_text_chunks = text_splitter.split_text(page_text)
+        # Шаг 3: Извлекаем таблицы и разбиваем текст с их сохранением
+        tables = extract_tables_with_context(page_text)
+        page_text_chunks = split_text_preserving_tables(
+            page_text, text_splitter, tables
+        )
         chunk_position = current_position
 
-        for chunk_text in page_text_chunks:
-            if is_garbage_chunk(chunk_text):
-                # Обновляем позицию даже для пропущенных чанков
+        for chunk_text, is_table in page_text_chunks:
+            if is_garbage_chunk(chunk_text) and not is_table:
+                # Не пропускаем таблицы даже если они маленькие
                 chunk_position += len(chunk_text)
                 continue
 
@@ -409,6 +566,7 @@ def create_chunks_with_metadata(page_chunks: list[dict]) -> list[Chunk]:
                     chunk_id=chunk_id,
                     page=page_num,
                     section=chunk_section,
+                    is_table=is_table,
                 )
             )
             chunk_id += 1
@@ -425,8 +583,8 @@ def save_parsed_file(file_path: str, md_text: str) -> None:
     # Создаем директорию parsed_logs, если она не существует
     PARSED_FILES_LOGS_DIR.mkdir(exist_ok=True)
 
-    # Удаляем расширение (.pdf или .md)
-    base_name = file_path.replace(".pdf", "").replace(".md", "")
+    # Удаляем расширение (.pdf, .md или .docx)
+    base_name = file_path.replace(".pdf", "").replace(".md", "").replace(".docx", "")
     log_file_name = f"{base_name}_parsed.md"
     log_file_path = PARSED_FILES_LOGS_DIR / log_file_name
 
@@ -480,8 +638,57 @@ def parse_markdown_file(file_path: Path) -> list[dict]:
     return chunks if chunks else [{"text": content, "metadata": {"page": 1}}]
 
 
+def parse_docx_file(file_path: Path) -> list[dict]:
+    """Парсит DOCX файл с помощью Docling в формат, аналогичный pymupdf4llm.
+
+    Использует Docling для корректного парсинга таблиц и формул.
+
+    Args:
+        file_path: Путь к DOCX файлу
+
+    Returns:
+        Список словарей с текстом и метаданными
+    """
+    converter = _get_docling_converter()
+    result = converter.convert(str(file_path))
+
+    # Экспортируем в Markdown для корректного отображения таблиц и формул
+    md_content = result.document.export_to_markdown()
+
+    # Разбиваем по заголовкам первого уровня или по размеру (имитация страниц)
+    chunks = []
+    current_chunk = ""
+    page_num = 1
+
+    lines = md_content.split("\n")
+    for line in lines:
+        # Если встречаем заголовок первого уровня и уже есть текст, создаем новую "страницу"
+        if line.startswith("# ") and current_chunk.strip():
+            chunks.append(
+                {"text": current_chunk.strip(), "metadata": {"page": page_num}}
+            )
+            page_num += 1
+            current_chunk = line + "\n"
+        else:
+            current_chunk += line + "\n"
+
+            # Если чанк стал слишком большим, разбиваем
+            if len(current_chunk) > 3000:
+                chunks.append(
+                    {"text": current_chunk.strip(), "metadata": {"page": page_num}}
+                )
+                page_num += 1
+                current_chunk = ""
+
+    # Добавляем последний чанк
+    if current_chunk.strip():
+        chunks.append({"text": current_chunk.strip(), "metadata": {"page": page_num}})
+
+    return chunks if chunks else [{"text": md_content, "metadata": {"page": 1}}]
+
+
 def index_file(file_path: Path, db_name: str) -> int:
-    """Индексирует файл (PDF или MD) в указанную БД.
+    """Индексирует файл (PDF, MD или DOCX) в указанную БД.
 
     Args:
         file_path: Путь к файлу
@@ -507,6 +714,8 @@ def index_file(file_path: Path, db_name: str) -> int:
             page_chunks = pymupdf4llm.to_markdown(str(file_path), page_chunks=True)
         elif file_ext == ".md":
             page_chunks = parse_markdown_file(file_path)
+        elif file_ext == ".docx":
+            page_chunks = parse_docx_file(file_path)
         else:
             print(f"[WARN] {file_name} — неподдерживаемый формат: {file_ext}")
             return 0
@@ -539,6 +748,7 @@ def index_file(file_path: Path, db_name: str) -> int:
             "chunk_id": c.chunk_id,
             "page": c.page,
             "section": c.section or "unknown",
+            "is_table": c.is_table,
         }
         for c in chunks
     ]
@@ -551,16 +761,22 @@ def index_file(file_path: Path, db_name: str) -> int:
     )
 
     sections = {}
+    table_count = 0
     for c in chunks:
         s = c.section or "unknown"
         sections[s] = sections.get(s, 0) + 1
+        if c.is_table:
+            table_count += 1
 
     # Определяем количество страниц
     total_pages = len(page_chunks)
     section_info = ", ".join(f"{k}: {v}" for k, v in sorted(sections.items()))
-    file_type = "PDF" if file_ext == ".pdf" else "MD"
+    file_type_map = {".pdf": "PDF", ".md": "MD", ".docx": "DOCX"}
+    file_type = file_type_map.get(file_ext, file_ext.upper())
     print(f"[OK] {file_name} ({file_type})")
-    print(f"     Чанков: {len(chunks)} | Страниц: {total_pages}")
+    print(
+        f"     Чанков: {len(chunks)} | Страниц: {total_pages} | Таблиц: {table_count}"
+    )
     print(f"     Секции: {section_info}")
 
     return len(chunks)
@@ -573,7 +789,7 @@ def index_pdf(file_path: Path, db_name: str) -> int:
 
 
 def index_all_pdfs(db_name: Optional[str] = None) -> None:
-    """Индексирует все файлы (PDF и MD) из папки articles.
+    """Индексирует все файлы (PDF, MD и DOCX) из папки articles.
 
     Args:
         db_name: Имя БД (поддиректория в articles/). Если None, индексирует все доступные БД.
@@ -586,7 +802,7 @@ def index_all_pdfs(db_name: Optional[str] = None) -> None:
         available_dbs = list_available_dbs()
         if not available_dbs:
             print(f"Нет поддиректорий в папке {ARTICLES_DIR}")
-            print("Создайте поддиректории и поместите в них PDF/MD файлы")
+            print("Создайте поддиректории и поместите в них PDF/MD/DOCX файлы")
             return
 
         print(f"{'=' * 60}")
@@ -599,26 +815,29 @@ def index_all_pdfs(db_name: Optional[str] = None) -> None:
 
 
 def _index_db(db_name: str) -> None:
-    """Индексирует одну БД (все PDF и MD файлы из соответствующей директории)."""
+    """Индексирует одну БД (все PDF, MD и DOCX файлы из соответствующей директории)."""
     articles_subdir = get_articles_subdir(db_name)
 
     if not articles_subdir.exists():
         print(f"[ERROR] Директория {articles_subdir} не существует")
         return
 
-    # Собираем все PDF и MD файлы
+    # Собираем все PDF, MD и DOCX файлы
     pdf_files = sorted(articles_subdir.glob("*.pdf"))
     md_files = sorted(articles_subdir.glob("*.md"))
-    all_files = pdf_files + md_files
+    docx_files = sorted(articles_subdir.glob("*.docx"))
+    all_files = pdf_files + md_files + docx_files
 
     if not all_files:
-        print(f"[WARN] Нет PDF/MD файлов в папке {articles_subdir}")
+        print(f"[WARN] Нет PDF/MD/DOCX файлов в папке {articles_subdir}")
         return
 
     print(f"{'=' * 60}")
     print(f"База данных: {db_name}")
     print(f"Директория: {articles_subdir}")
-    print(f"Найдено {len(pdf_files)} PDF файлов, {len(md_files)} MD файлов")
+    print(
+        f"Найдено {len(pdf_files)} PDF, {len(md_files)} MD, {len(docx_files)} DOCX файлов"
+    )
     print(f"{'=' * 60}\n")
 
     total_chunks = 0
@@ -784,7 +1003,9 @@ def list_dbs() -> None:
 
     if not available and not existing:
         print("Нет баз данных.")
-        print("Создайте поддиректории в папке articles/ и поместите в них PDF/MD файлы")
+        print(
+            "Создайте поддиректории в папке articles/ и поместите в них PDF/MD/DOCX файлы"
+        )
     else:
         if available:
             print("\nДиректории с файлами (готовы к индексации):")
@@ -792,11 +1013,14 @@ def list_dbs() -> None:
                 articles_subdir = get_articles_subdir(db)
                 pdf_count = len(list(articles_subdir.glob("*.pdf")))
                 md_count = len(list(articles_subdir.glob("*.md")))
+                docx_count = len(list(articles_subdir.glob("*.docx")))
                 file_types = []
                 if pdf_count:
                     file_types.append(f"{pdf_count} PDF")
                 if md_count:
                     file_types.append(f"{md_count} MD")
+                if docx_count:
+                    file_types.append(f"{docx_count} DOCX")
                 files_str = ", ".join(file_types) if file_types else "0 файлов"
                 indexed = (
                     "✓ проиндексирована" if db in existing else "○ не проиндексирована"

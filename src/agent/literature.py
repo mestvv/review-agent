@@ -20,6 +20,8 @@ from src.config import (
     LLM_BASE_URL,
     LLM_API_KEY,
     LLM_TEMPERATURE,
+    EXPAND_WINDOW,
+    EXPAND_TOP_N,
 )
 from src.rag.retriever import (
     retrieve_chunks,
@@ -219,7 +221,7 @@ def answer_question(
     expand_context: bool = True,
 ) -> None:
     """Отвечает на научный вопрос с цитированием.
-    
+
     Args:
         question: Вопрос для ответа
         db_name: Имя базы данных для поиска
@@ -240,14 +242,19 @@ def answer_question(
     expanded_chunks = []
     if expand_context:
         seen_ids = {f"{c.file_hash}_{c.chunk_id}" for c in initial_chunks}
-        for chunk in initial_chunks[:3]:
-            neighbors = get_neighbor_chunks(chunk, db_name, window=1)
+        # Используем конфигурационный параметр для количества топ-чанков
+        top_n_for_expansion = min(EXPAND_TOP_N, len(initial_chunks))
+        for chunk in initial_chunks[:top_n_for_expansion]:
+            # Передаем query для вычисления реального distance и используем конфигурационный window
+            neighbors = get_neighbor_chunks(
+                chunk, db_name, window=EXPAND_WINDOW, query=question
+            )
             for n in neighbors:
                 key = f"{n.file_hash}_{n.chunk_id}"
                 if key not in seen_ids:
                     expanded_chunks.append(n)
                     seen_ids.add(key)
-        chunks = expanded_chunks + initial_chunks[3:]
+        chunks = expanded_chunks + initial_chunks[top_n_for_expansion:]
     else:
         chunks = initial_chunks
 
@@ -290,7 +297,7 @@ def review_topic(
     sections: Optional[list[str]] = None,
 ) -> None:
     """Генерирует обзор литературы по теме.
-    
+
     Args:
         topic: Тема для обзора
         db_name: Имя базы данных для поиска
@@ -365,7 +372,7 @@ def search_chunks(
     section: Optional[str] = None,
 ) -> None:
     """Поиск и отображение чанков (без LLM).
-    
+
     Args:
         query: Поисковый запрос
         db_name: Имя базы данных для поиска

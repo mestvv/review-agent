@@ -74,12 +74,12 @@ def list_existing_dbs() -> list[str]:
 CHROMA_DB_PATH = CHROMA_DB_BASE_PATH
 
 # Chunking параметры
-CHUNK_SIZE = 800  # Увеличено с 600 для лучшего контекста
-CHUNK_OVERLAP = 200  # Увеличено с 120 для перекрытия
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 150
 MIN_CHUNK_LENGTH = 100
 
 # Модели
-SENTENCE_TRANSFORMER_MODEL = "sentence-transformers/all-mpnet-base-v2"
+SENTENCE_TRANSFORMER_MODEL = "intfloat/multilingual-e5-large"
 
 # Reranker
 RERANKER_MODEL = os.getenv(
@@ -92,6 +92,14 @@ USE_RERANKER = os.getenv("USE_RERANKER", "true").lower() == "true"
 INITIAL_FETCH_COUNT = int(
     os.getenv("INITIAL_FETCH_COUNT", "40")
 )  # Увеличено с 10 до 40
+
+# Параметры расширения контекста
+EXPAND_WINDOW = int(
+    os.getenv("EXPAND_WINDOW", "1")
+)  # Размер окна для расширения контекста соседними чанками (количество чанков с каждой стороны)
+EXPAND_TOP_N = int(
+    os.getenv("EXPAND_TOP_N", "5")
+)  # Количество топ-чанков, для которых добавляются соседи
 
 # LLM
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-r1-0528-qwen3-8b")

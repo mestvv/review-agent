@@ -5,6 +5,7 @@ click>=8.0.0
 
 # PDF обработка
 PyMuPDF>=1.24.0
+pymupdf4llm>=0.0.17
 
 # Эмбеддинги и ML
 sentence-transformers>=3.0.0
@@ -25,3 +26,6 @@ rich>=13.0.0
 
 # Конфигурация
 python-dotenv>=1.0.0
+
+# Docling для DOCX/PDF конвертации с поддержкой таблиц и формул
+docling>=2.0.0

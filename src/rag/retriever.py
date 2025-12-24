@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Optional
 
 import chromadb
+import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from src.config import (
@@ -192,7 +193,7 @@ def retrieve_chunks(
 
 
 def get_neighbor_chunks(
-    chunk: RetrievedChunk, db_name: str, window: int = 1
+    chunk: RetrievedChunk, db_name: str, window: int = 1, query: Optional[str] = None
 ) -> list[RetrievedChunk]:
     """Извлекает соседние чанки для расширения контекста.
     
@@ -200,6 +201,7 @@ def get_neighbor_chunks(
         chunk: Чанк, для которого ищем соседей
         db_name: Имя базы данных
         window: Размер окна (количество соседних чанков с каждой стороны)
+        query: Опциональный запрос для вычисления реального distance
         
     Returns:
         Список соседних чанков
@@ -213,17 +215,41 @@ def get_neighbor_chunks(
     results = collection.get(ids=neighbor_ids, include=["documents", "metadatas"])
 
     neighbors = []
+    # Если передан query, вычисляем реальное distance для каждого соседнего чанка
+    query_embedding = None
+    if query:
+        model = _get_embedding_model()
+        query_embedding = model.encode([query])[0]
+
     for doc, meta in zip(results["documents"], results["metadatas"]):
         if doc and meta:
+            chunk_id_val = meta.get("chunk_id", 0)
+            
+            # Вычисляем реальное distance, если query передан
+            if query and query_embedding is not None:
+                model = _get_embedding_model()
+                doc_embedding = model.encode([doc])[0]
+                # Вычисляем косинусное сходство
+                similarity = float(
+                    np.dot(query_embedding, doc_embedding)
+                    / (np.linalg.norm(query_embedding) * np.linalg.norm(doc_embedding))
+                )
+                # Конвертируем в distance (1 - similarity для ChromaDB)
+                distance = 1.0 - similarity
+            else:
+                # Используем большое значение для expanded chunks без реального distance
+                # чтобы они были в конце при сортировке по distance
+                distance = 999.0
+            
             neighbors.append(
                 RetrievedChunk(
                     text=doc,
                     file_name=meta.get("file_name", "unknown"),
                     file_hash=meta.get("file_hash", ""),
-                    chunk_id=meta.get("chunk_id", 0),
+                    chunk_id=chunk_id_val,
                     page=meta.get("page", 0),
                     section=meta.get("section", "unknown"),
-                    distance=0.0,
+                    distance=distance,
                 )
             )
     return sorted(neighbors, key=lambda c: c.chunk_id)
