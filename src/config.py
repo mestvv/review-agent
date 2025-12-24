@@ -13,7 +13,7 @@ CHROMA_DB_BASE_PATH = "./chroma_db"  # Базовая директория дл�
 COLLECTION_NAME = "literature_review"
 CHUNKS_LOG_DIR = Path("./chunks_log")
 RESPONSES_LOG_DIR = Path("./responses_log")
-LATEX_OUTPUT_DIR = Path("./latex_output")
+RESULTS_DIR = Path("./results")
 PARSED_FILES_LOGS_DIR = Path("./parsed_files_logs")
 
 

@@ -224,3 +224,4 @@ latex_output/
 .DS_Store
 RAG-Challenge-2/
 parsed_files_logs/
+results/

@@ -16,6 +16,7 @@ from rich.table import Table
 from src.config import (
     CHUNKS_LOG_DIR,
     RESPONSES_LOG_DIR,
+    RESULTS_DIR,
     LLM_MODEL,
     LLM_BASE_URL,
     LLM_API_KEY,
@@ -120,6 +121,98 @@ def _save_response_to_json(query, response) -> None:
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2, default=str)
     logger.info(f"💾 Ответ сохранён в {filepath}")
+
+
+def _save_to_markdown(
+    query: str,
+    response_content: str,
+    chunks: list[RetrievedChunk],
+    query_type: str = "ask",
+    confidence: Optional[ConfidenceScore] = None,
+) -> None:
+    """Сохраняет ответ в Markdown формате.
+
+    Args:
+        query: Вопрос или тема
+        response_content: Содержимое ответа от LLM
+        chunks: Список использованных чанков
+        query_type: Тип запроса ('ask' или 'review')
+        confidence: Оценка уверенности (опционально)
+    """
+    RESULTS_DIR.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    safe_query = re.sub(r"[^\w\s-]", "", query[:50]).strip().replace(" ", "_")
+    filepath = RESULTS_DIR / f"{query_type}_{timestamp}_{safe_query}.md"
+
+    # Собираем уникальные источники
+    sources = {}
+    for chunk in chunks:
+        if chunk.file_name not in sources:
+            sources[chunk.file_name] = {
+                "pages": set(),
+                "sections": set(),
+            }
+        sources[chunk.file_name]["pages"].add(chunk.page)
+        sources[chunk.file_name]["sections"].add(chunk.section)
+
+    # Формируем Markdown документ
+    md_doc = f"""# {query}
+
+**Дата:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}  
+**Тип запроса:** {query_type}
+
+"""
+
+    # Добавляем информацию о confidence, если есть
+    if confidence:
+        level_text = {
+            ConfidenceLevel.HIGH: "Высокая",
+            ConfidenceLevel.MEDIUM: "Средняя",
+            ConfidenceLevel.LOW: "Низкая",
+            ConfidenceLevel.VERY_LOW: "Очень низкая",
+        }.get(confidence.level, "Неизвестна")
+
+        md_doc += f"""## Метаданные
+
+- **Тип запроса:** {query_type}
+- **Уверенность:** {level_text} (score: {confidence.score:.2f})
+- **Количество источников:** {confidence.num_sources}
+- **Количество чанков:** {confidence.num_chunks}
+- **Средняя дистанция:** {confidence.avg_distance:.3f}
+
+"""
+
+    # Основной контент
+    md_doc += f"""## Ответ
+
+{response_content}
+
+"""
+
+    # Добавляем источники, если они есть
+    if sources:
+        md_doc += """## Использованные источники
+
+"""
+
+        # Добавляем источники
+        for source_name, info in sorted(sources.items()):
+            pages = sorted(info["pages"])
+            sections = sorted(info["sections"])
+            pages_str = ", ".join(map(str, pages))
+            sections_str = ", ".join(sections) if sections else None
+
+            md_doc += f"- **{source_name}**\n"
+            md_doc += f"  - Страницы: {pages_str}\n"
+            if sections_str:
+                md_doc += f"  - Секции: {sections_str}\n"
+            md_doc += "\n"
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(md_doc)
+
+    logger.info(f"💾 Результат сохранён в Markdown: {filepath}")
 
 
 def _format_confidence_for_prompt(confidence: ConfidenceScore, query_type: str) -> str:
@@ -276,6 +369,15 @@ def answer_question(
         response,
     )
 
+    # Сохранение в Markdown
+    _save_to_markdown(
+        query=question,
+        response_content=response.content,
+        chunks=chunks,
+        query_type="ask",
+        confidence=confidence,
+    )
+
     # Вывод
     console.print(Rule("[bold blue]Ответ на вопрос[/bold blue]"))
     _print_confidence(confidence)
@@ -349,6 +451,15 @@ def review_topic(
     _save_response_to_json(
         {"topic": topic, "context": context[:8000], "confidence": confidence.to_dict()},
         response,
+    )
+
+    # Сохранение в Markdown
+    _save_to_markdown(
+        query=topic,
+        response_content=response.content,
+        chunks=all_chunks,
+        query_type="review",
+        confidence=confidence,
     )
 
     # Вывод
