@@ -105,6 +105,12 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:1234/v1")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "lm-studio")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.1"))
 
+# LLM для агента с инструментами
+# ВАЖНО: deepseek-reasoner НЕ совместим с LangGraph из-за требования
+# передачи reasoning_content при tool calls. Используем deepseek-chat.
+# См. https://api-docs.deepseek.com/guides/thinking_mode#tool-calls
+AGENT_LLM_MODEL = os.getenv("AGENT_LLM_MODEL", "deepseek-chat")
+
 # Section-aware Re-ranking веса
 SECTION_WEIGHTS = {
     "results": {

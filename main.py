@@ -114,8 +114,19 @@ def cmd_stats(db: Optional[str]):
 @click.option("--question", "-q", default=None, help="Вопрос для ответа")
 @click.option("--n-results", "-n", default=5, help="Количество чанков для поиска")
 @click.option("--db", "-d", default=None, help="Имя БД для поиска")
-@click.option("--temperature", "-t", default=None, type=float, help="Температура генерации (0.0-2.0)")
-def cmd_ask(question: Optional[str], n_results: int, db: Optional[str], temperature: Optional[float]):
+@click.option(
+    "--temperature",
+    "-t",
+    default=None,
+    type=float,
+    help="Температура генерации (0.0-2.0)",
+)
+def cmd_ask(
+    question: Optional[str],
+    n_results: int,
+    db: Optional[str],
+    temperature: Optional[float],
+):
     """Ответ на вопрос по научной литературе."""
     from src.agent import answer_question
 
@@ -135,8 +146,15 @@ def cmd_ask(question: Optional[str], n_results: int, db: Optional[str], temperat
 @click.option("--topic", "-t", default=None, help="Тема для обзора литературы")
 @click.option("--n-results", "-n", default=15, help="Количество чанков для поиска")
 @click.option("--db", "-d", default=None, help="Имя БД для поиска")
-@click.option("--temperature", default=None, type=float, help="Температура генерации (0.0-2.0)")
-def cmd_review(topic: Optional[str], n_results: int, db: Optional[str], temperature: Optional[float]):
+@click.option(
+    "--temperature", default=None, type=float, help="Температура генерации (0.0-2.0)"
+)
+def cmd_review(
+    topic: Optional[str],
+    n_results: int,
+    db: Optional[str],
+    temperature: Optional[float],
+):
     """Обзор литературы по теме."""
     from src.agent import review_topic
 
@@ -173,6 +191,69 @@ def cmd_search(
         query = click.prompt("Поисковый запрос")
 
     search_chunks(query, db_name, n_results=n_results, section=section)
+
+
+@cli.command("agent")
+@click.option("--question", "-q", default=None, help="Вопрос для агента")
+@click.option("--db", "-d", default=None, help="Имя БД для поиска")
+@click.option(
+    "--temperature",
+    "-t",
+    default=None,
+    type=float,
+    help="Температура генерации (0.0-2.0)",
+)
+def cmd_agent(
+    question: Optional[str],
+    db: Optional[str],
+    temperature: Optional[float],
+):
+    """Запуск агента с инструментами для ответа на вопрос.
+
+    Агент автоматически ищет информацию в векторной БД,
+    может делать несколько запросов для полного ответа.
+    """
+    from src.agent import run_agent
+
+    # Выбираем БД (опционально)
+    db_name = None
+    if db:
+        db_name = select_database(db)
+        if not db_name:
+            return
+
+    # Запрашиваем вопрос, если не указан
+    if not question:
+        question = click.prompt("Ваш вопрос")
+
+    run_agent(question, db_name=db_name, temperature=temperature)
+
+
+@cli.command("chat")
+@click.option("--db", "-d", default=None, help="Имя БД по умолчанию для поиска")
+@click.option(
+    "--temperature",
+    "-t",
+    default=None,
+    type=float,
+    help="Температура генерации (0.0-2.0)",
+)
+def cmd_chat(db: Optional[str], temperature: Optional[float]):
+    """Интерактивный чат с RAG-агентом.
+
+    Агент сам ищет информацию в векторной БД и отвечает на вопросы.
+    Введите 'exit' или 'quit' для выхода.
+    """
+    from src.agent import chat_with_agent
+
+    # Выбираем БД (опционально)
+    db_name = None
+    if db:
+        db_name = select_database(db)
+        if not db_name:
+            return
+
+    chat_with_agent(db_name=db_name, temperature=temperature)
 
 
 if __name__ == "__main__":
