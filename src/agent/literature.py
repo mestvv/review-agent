@@ -347,7 +347,12 @@ def answer_question(
                 if key not in seen_ids:
                     expanded_chunks.append(n)
                     seen_ids.add(key)
-        chunks = expanded_chunks + initial_chunks[top_n_for_expansion:]
+        # Объединяем: топ чанки + их соседи + остальные чанки
+        chunks = (
+            initial_chunks[:top_n_for_expansion]
+            + expanded_chunks
+            + initial_chunks[top_n_for_expansion:]
+        )
     else:
         chunks = initial_chunks
 

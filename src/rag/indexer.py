@@ -498,6 +498,9 @@ def split_text_preserving_tables(
 def create_chunks_with_metadata(page_chunks: list[dict]) -> list[Chunk]:
     """Создает чанки из данных pymupdf4llm с метаданными страниц и секций.
 
+    Объединяет текст всех страниц перед разбиением на чанки, чтобы не терять
+    информацию на границах страниц PDF.
+
     Использует интеллектуальное определение секций:
     1. Находит все заголовки секций в документе
     2. Определяет границы каждой секции
@@ -524,7 +527,9 @@ def create_chunks_with_metadata(page_chunks: list[dict]) -> list[Chunk]:
         (b for b in section_boundaries if b.section_name == "references"), None
     )
 
-    # Шаг 2: Собираем полный текст и обрабатываем страницы
+    # Шаг 2: Собираем полный текст и строим маппинг позиций -> номер страницы
+    full_text_parts = []
+    page_boundaries = []  # [(start_pos, end_pos, page_num), ...]
     current_position = 0
 
     for page_data in page_chunks:
@@ -544,36 +549,63 @@ def create_chunks_with_metadata(page_chunks: list[dict]) -> list[Chunk]:
             current_position += len(page_text) + 2
             continue
 
-        # Шаг 3: Извлекаем таблицы и разбиваем текст с их сохранением
-        tables = extract_tables_with_context(page_text)
-        page_text_chunks = split_text_preserving_tables(
-            page_text, text_splitter, tables
-        )
-        chunk_position = current_position
+        # Сохраняем границы страницы
+        start_pos = len("\n\n".join(full_text_parts)) + (2 if full_text_parts else 0)
+        full_text_parts.append(page_text)
+        end_pos = len("\n\n".join(full_text_parts))
+        page_boundaries.append((start_pos, end_pos, page_num))
 
-        for chunk_text, is_table in page_text_chunks:
-            if is_garbage_chunk(chunk_text) and not is_table:
-                # Не пропускаем таблицы даже если они маленькие
-                chunk_position += len(chunk_text)
-                continue
-
-            # Определяем секцию чанка по его позиции
-            chunk_section = determine_chunk_section(chunk_position, section_boundaries)
-
-            chunks.append(
-                Chunk(
-                    text=chunk_text.strip(),
-                    chunk_id=chunk_id,
-                    page=page_num,
-                    section=chunk_section,
-                    is_table=is_table,
-                )
-            )
-            chunk_id += 1
-            chunk_position += len(chunk_text)
-
-        # Переходим к следующей странице (+2 для \n\n между страницами)
         current_position += len(page_text) + 2
+
+    if not full_text_parts:
+        return chunks
+
+    # Объединяем весь текст документа
+    full_text = "\n\n".join(full_text_parts)
+
+    def get_page_for_position(pos: int) -> int:
+        """Определяет номер страницы по позиции в тексте."""
+        for start, end, page_num in page_boundaries:
+            if start <= pos < end:
+                return page_num
+        # Если позиция за пределами, возвращаем последнюю страницу
+        return page_boundaries[-1][2] if page_boundaries else 1
+
+    # Шаг 3: Извлекаем таблицы и разбиваем текст с их сохранением
+    tables = extract_tables_with_context(full_text)
+    text_chunks = split_text_preserving_tables(full_text, text_splitter, tables)
+
+    # Отслеживаем позицию в полном тексте
+    chunk_position = 0
+
+    for chunk_text, is_table in text_chunks:
+        # Находим позицию чанка в полном тексте
+        chunk_start = full_text.find(chunk_text, chunk_position)
+        if chunk_start == -1:
+            chunk_start = chunk_position
+
+        if is_garbage_chunk(chunk_text) and not is_table:
+            # Не пропускаем таблицы даже если они маленькие
+            chunk_position = chunk_start + len(chunk_text)
+            continue
+
+        # Определяем номер страницы по позиции чанка
+        page_num = get_page_for_position(chunk_start)
+
+        # Определяем секцию чанка по его позиции
+        chunk_section = determine_chunk_section(chunk_start, section_boundaries)
+
+        chunks.append(
+            Chunk(
+                text=chunk_text.strip(),
+                chunk_id=chunk_id,
+                page=page_num,
+                section=chunk_section,
+                is_table=is_table,
+            )
+        )
+        chunk_id += 1
+        chunk_position = chunk_start + len(chunk_text)
 
     return chunks
 

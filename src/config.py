@@ -74,9 +74,9 @@ def list_existing_dbs() -> list[str]:
 CHROMA_DB_PATH = CHROMA_DB_BASE_PATH
 
 # Chunking параметры
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 150
-MIN_CHUNK_LENGTH = 100
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
+MIN_CHUNK_LENGTH = 50
 
 # Модели
 SENTENCE_TRANSFORMER_MODEL = "intfloat/multilingual-e5-large"
@@ -89,9 +89,7 @@ RERANKER_TOP_K = 10
 USE_RERANKER = os.getenv("USE_RERANKER", "true").lower() == "true"
 
 # Retrieval параметры
-INITIAL_FETCH_COUNT = int(
-    os.getenv("INITIAL_FETCH_COUNT", "40")
-)  # Увеличено с 10 до 40
+INITIAL_FETCH_COUNT = int(os.getenv("INITIAL_FETCH_COUNT", "40"))
 
 # Параметры расширения контекста
 EXPAND_WINDOW = int(
