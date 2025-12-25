@@ -172,6 +172,93 @@ def _save_agent_result_to_markdown(
     logger.info("💾 Результат сохранён в %s", filepath)
 
 
+def _serialize_messages(messages: list) -> list[dict]:
+    """Преобразует список сообщений в сериализуемый формат."""
+    messages_data = []
+    for msg in messages:
+        msg_dict = {
+            "type": msg.__class__.__name__,
+            "content": msg.content if hasattr(msg, "content") else str(msg),
+        }
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            msg_dict["tool_calls"] = [
+                {"name": tc["name"], "args": tc["args"]} for tc in msg.tool_calls
+            ]
+        if hasattr(msg, "name"):
+            msg_dict["name"] = msg.name
+        messages_data.append(msg_dict)
+    return messages_data
+
+
+def _save_chat_session_to_json(
+    chat_history: list[dict],
+    db_name: Optional[str],
+    session_start: datetime,
+) -> None:
+    """Сохраняет сессию чата в JSON."""
+    RESPONSES_LOG_DIR.mkdir(exist_ok=True)
+    timestamp = session_start.strftime("%Y%m%d_%H%M%S")
+    filepath = RESPONSES_LOG_DIR / f"chat_session_{timestamp}.json"
+
+    data = {
+        "session_start": session_start.isoformat(),
+        "session_end": datetime.now().isoformat(),
+        "db_name": db_name,
+        "total_exchanges": len(chat_history),
+        "exchanges": chat_history,
+    }
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+
+    logger.info("💾 Сессия чата сохранена в %s", filepath)
+
+
+def _save_chat_session_to_markdown(
+    chat_history: list[dict],
+    db_name: Optional[str],
+    session_start: datetime,
+) -> None:
+    """Сохраняет сессию чата в Markdown."""
+    if not chat_history:
+        return
+
+    RESULTS_DIR.mkdir(exist_ok=True)
+    timestamp = session_start.strftime("%Y%m%d_%H%M%S")
+    filepath = RESULTS_DIR / f"chat_session_{timestamp}.md"
+
+    md_content = f"""# Сессия чата с RAG-агентом
+
+**Начало сессии:** {session_start.strftime("%Y-%m-%d %H:%M:%S")}  
+**Конец сессии:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}  
+**База данных:** {db_name or "не указана"}  
+**Количество обменов:** {len(chat_history)}
+
+---
+
+"""
+
+    for i, exchange in enumerate(chat_history, 1):
+        md_content += f"""## Обмен {i}
+
+**Вопрос:** {exchange["question"]}
+
+**Вызовов инструментов:** {exchange["tool_calls_count"]}
+
+### Ответ
+
+{exchange["response"]}
+
+---
+
+"""
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(md_content)
+
+    logger.info("💾 Сессия чата сохранена в Markdown: %s", filepath)
+
+
 def run_agent(
     question: str,
     db_name: Optional[str] = None,
@@ -278,12 +365,14 @@ def stream_agent(
 def chat_with_agent(
     db_name: Optional[str] = None,
     temperature: Optional[float] = None,
+    save_logs: bool = True,
 ) -> None:
     """Интерактивный чат с агентом с сохранением истории.
 
     Args:
         db_name: Имя БД по умолчанию (опционально)
         temperature: Температура генерации (опционально)
+        save_logs: Сохранять логи сессии (по умолчанию True)
 
     Команды:
         exit, quit, выход - выход из чата
@@ -300,8 +389,12 @@ def chat_with_agent(
     # Создаём агента один раз для сохранения контекста
     agent = create_rag_agent(temperature)
 
-    # История сообщений
+    # История сообщений для агента
     messages: list = []
+
+    # История обменов для логирования
+    chat_history: list[dict] = []
+    session_start = datetime.now()
 
     while True:
         try:
@@ -352,6 +445,17 @@ def chat_with_agent(
                         final_response = msg.content
                         break
 
+            # Сохраняем обмен в историю для логирования
+            chat_history.append(
+                {
+                    "question": question,
+                    "response": final_response,
+                    "tool_calls_count": tool_calls_count,
+                    "timestamp": datetime.now().isoformat(),
+                    "messages_in_context": len(messages),
+                }
+            )
+
             # Выводим ответ
             console.print(
                 f"[dim]Вызовов инструментов: {tool_calls_count} | Сообщений в истории: {len(messages)}[/dim]\n"
@@ -372,3 +476,9 @@ def chat_with_agent(
         except RuntimeError as e:
             console.print(f"[red]Ошибка: {e}[/red]")
             logger.exception("Ошибка в chat_with_agent")
+
+    # Сохраняем логи сессии при выходе
+    if save_logs and chat_history:
+        _save_chat_session_to_json(chat_history, db_name, session_start)
+        _save_chat_session_to_markdown(chat_history, db_name, session_start)
+        console.print(f"[dim]📝 Сессия сохранена ({len(chat_history)} обменов)[/dim]")
