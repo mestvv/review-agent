@@ -15,7 +15,13 @@ from src.agent.agent import (
     _save_response_to_json,
     _save_to_markdown,
 )
+from src.agent.agent_with_tools import (
+    create_rag_agent,
+    _save_chat_session_to_json,
+    _save_chat_session_to_markdown,
+)
 from src.agent.prompts import QA_PROMPT, REVIEW_PROMPT
+from langchain_core.messages import HumanMessage, AIMessage
 from src.config import (
     list_existing_dbs,
     list_available_dbs,
@@ -52,7 +58,15 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Инициализация состояния сессии (если понадобится в будущем)
+# Инициализация состояния сессии для чата с агентом
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = []  # История для агента (LangChain messages)
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []  # История для логирования
+if "chat_session_start" not in st.session_state:
+    st.session_state.chat_session_start = None
+if "chat_agent" not in st.session_state:
+    st.session_state.chat_agent = None
 
 
 def _save_chunks_to_json(
@@ -598,8 +612,8 @@ if not selected_db:
         )
 else:
     # Вкладки для разных функций
-    tab1, tab2, tab3 = st.tabs(
-        ["💬 Задать вопрос", "📝 Обзор литературы", "🔍 Поиск чанков"]
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["💬 Задать вопрос", "📝 Обзор литературы", "🔍 Поиск чанков", "🤖 Чат с агентом"]
     )
 
     with tab1:
@@ -827,3 +841,125 @@ else:
                         st.warning("Ничего не найдено")
             else:
                 st.warning("Введите поисковый запрос")
+
+    with tab4:
+        st.subheader("🤖 Чат с RAG-агентом")
+        st.markdown(
+            """
+            Агент автоматически ищет информацию в базе данных и отвечает на вопросы.
+            История диалога сохраняется между сообщениями.
+            """
+        )
+
+        # Настройки агента
+        with st.expander("⚙️ Настройки", expanded=False):
+            agent_temperature = st.slider(
+                "Temperature",
+                min_value=0.0,
+                max_value=2.0,
+                value=LLM_TEMPERATURE,
+                step=0.1,
+                help="Температура генерации",
+                key="agent_temperature",
+            )
+
+        # Кнопки управления
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("🗑️ Очистить историю", use_container_width=True):
+                st.session_state.chat_messages = []
+                st.session_state.chat_history = []
+                st.session_state.chat_agent = None
+                st.session_state.chat_session_start = None
+                st.rerun()
+        with col2:
+            if st.button("💾 Сохранить сессию", use_container_width=True):
+                if st.session_state.chat_history:
+                    _save_chat_session_to_json(
+                        st.session_state.chat_history,
+                        selected_db,
+                        st.session_state.chat_session_start or datetime.now(),
+                    )
+                    _save_chat_session_to_markdown(
+                        st.session_state.chat_history,
+                        selected_db,
+                        st.session_state.chat_session_start or datetime.now(),
+                    )
+                    st.success(f"Сессия сохранена ({len(st.session_state.chat_history)} обменов)")
+                else:
+                    st.warning("История пуста")
+        with col3:
+            st.metric("Сообщений", len(st.session_state.chat_messages))
+
+        st.markdown("---")
+
+        # Отображение истории чата
+        chat_container = st.container()
+        with chat_container:
+            for exchange in st.session_state.chat_history:
+                # Сообщение пользователя
+                with st.chat_message("user"):
+                    st.markdown(exchange["question"])
+                # Ответ агента
+                with st.chat_message("assistant"):
+                    st.markdown(exchange["response"])
+                    st.caption(f"🔧 Вызовов инструментов: {exchange['tool_calls_count']}")
+
+        # Поле ввода нового сообщения
+        if prompt := st.chat_input("Задайте вопрос агенту..."):
+            # Инициализируем агента если нужно
+            if st.session_state.chat_agent is None:
+                st.session_state.chat_agent = create_rag_agent(agent_temperature)
+                st.session_state.chat_session_start = datetime.now()
+
+            # Отображаем сообщение пользователя
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            # Формируем сообщение с указанием БД
+            user_message = f"[Используй базу данных: {selected_db}]\n\n{prompt}"
+            st.session_state.chat_messages.append(HumanMessage(content=user_message))
+
+            # Получаем ответ от агента
+            with st.chat_message("assistant"):
+                with st.spinner("Агент думает..."):
+                    try:
+                        result = st.session_state.chat_agent.invoke(
+                            {"messages": st.session_state.chat_messages}
+                        )
+
+                        # Обновляем историю сообщений
+                        st.session_state.chat_messages = result["messages"]
+
+                        # Считаем вызовы инструментов
+                        tool_calls_count = sum(
+                            len(msg.tool_calls)
+                            if hasattr(msg, "tool_calls") and msg.tool_calls
+                            else 0
+                            for msg in st.session_state.chat_messages
+                        )
+
+                        # Получаем последний ответ
+                        final_response = ""
+                        for msg in reversed(st.session_state.chat_messages):
+                            if isinstance(msg, AIMessage) and msg.content:
+                                if not (hasattr(msg, "tool_calls") and msg.tool_calls):
+                                    final_response = msg.content
+                                    break
+
+                        # Отображаем ответ
+                        st.markdown(final_response)
+                        st.caption(f"🔧 Вызовов инструментов: {tool_calls_count}")
+
+                        # Сохраняем в историю для логирования
+                        st.session_state.chat_history.append({
+                            "question": prompt,
+                            "response": final_response,
+                            "tool_calls_count": tool_calls_count,
+                            "timestamp": datetime.now().isoformat(),
+                            "messages_in_context": len(st.session_state.chat_messages),
+                        })
+
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+                        logging.exception("Ошибка в чате с агентом")
