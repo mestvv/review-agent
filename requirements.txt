@@ -6,6 +6,7 @@ click>=8.0.0
 # PDF обработка
 PyMuPDF>=1.24.0
 pymupdf4llm>=0.0.17
+pymupdf_layout>=0.1.0  # Для улучшенного анализа макета страниц
 
 # Эмбеддинги и ML
 sentence-transformers>=3.0.0
@@ -23,6 +24,7 @@ langchain-core>=0.2.0
 
 # UI
 rich>=13.0.0
+streamlit>=1.28.0
 
 # Конфигурация
 python-dotenv>=1.0.0
