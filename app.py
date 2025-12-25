@@ -8,7 +8,7 @@ from typing import Optional
 
 import streamlit as st
 
-from src.agent.literature import create_llm
+from src.agent.agent import create_llm
 from src.agent.prompts import QA_PROMPT, REVIEW_PROMPT
 from src.config import (
     list_existing_dbs,

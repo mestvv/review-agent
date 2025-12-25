@@ -133,7 +133,7 @@ python main.py clear --db climate
 │   │   └── retriever.py # Поиск чанков
 │   └── agent/           # Agent модуль
 │       ├── prompts.py   # Промпты LLM
-│       └── literature.py # Основная логика
+│       └── agent.py # Основная логика агента
 ├── articles/            # PDF, MD и DOCX файлы для индексации
 │   ├── climate/         # Поддиректория для климатических статей
 │   │   ├── paper1.pdf

@@ -1,6 +1,6 @@
 """Agent модуль для работы с научной литературой."""
 
-from src.agent.literature import (
+from src.agent.agent import (
     answer_question,
     review_topic,
     search_chunks,
