@@ -41,14 +41,20 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-def create_llm():
-    """Создаёт LLM клиент."""
+def create_llm(temperature: Optional[float] = None, streaming: bool = False):
+    """Создаёт LLM клиент.
+
+    Args:
+        temperature: Температура для генерации (если None, используется LLM_TEMPERATURE из конфига)
+        streaming: Включить потоковый вывод
+    """
     return ChatOpenAI(
         model=LLM_MODEL,
         base_url=LLM_BASE_URL,
         api_key=LLM_API_KEY,
-        temperature=LLM_TEMPERATURE,
+        temperature=temperature if temperature is not None else LLM_TEMPERATURE,
         extra_body={"thinking": {"type": "enabled"}},
+        streaming=streaming,
     )
 
 
@@ -276,6 +282,77 @@ def _print_confidence(confidence: ConfidenceScore) -> None:
     console.print()
 
 
+def stream_llm_answer_qa(
+    question: str,
+    context: str,
+    confidence_info: str,
+    temperature: Optional[float] = None,
+):
+    """Генерирует потоковый ответ от LLM для вопроса.
+
+    Args:
+        question: Вопрос
+        context: Контекст для ответа
+        confidence_info: Информация об уверенности
+        temperature: Температура для генерации (опционально)
+
+    Yields:
+        Токены ответа по мере генерации
+    """
+    llm = create_llm(temperature=temperature, streaming=True)
+
+    inputs = {
+        "question": question,
+        "context": context,
+        "confidence_info": confidence_info,
+    }
+
+    # Используем stream для потокового вывода
+    chain = QA_PROMPT | llm
+    for chunk in chain.stream(inputs):
+        if hasattr(chunk, "content"):
+            content = chunk.content
+            if content:  # Пропускаем пустые токены
+                yield content
+
+
+def stream_llm_answer_review(
+    topic: str,
+    context: str,
+    sources: str,
+    confidence_info: str,
+    temperature: Optional[float] = None,
+):
+    """Генерирует потоковый ответ от LLM для обзора.
+
+    Args:
+        topic: Тема обзора
+        context: Контекст для ответа
+        sources: Список источников
+        confidence_info: Информация об уверенности
+        temperature: Температура для генерации (опционально)
+
+    Yields:
+        Токены ответа по мере генерации
+    """
+    llm = create_llm(temperature=temperature, streaming=True)
+
+    inputs = {
+        "topic": topic,
+        "context": context,
+        "sources": sources,
+        "confidence_info": confidence_info,
+    }
+
+    # Используем stream для потокового вывода
+    chain = REVIEW_PROMPT | llm
+    for chunk in chain.stream(inputs):
+        if hasattr(chunk, "content"):
+            content = chunk.content
+            if content:  # Пропускаем пустые токены
+                yield content
+
+
 def _print_sources_table(chunks: list[RetrievedChunk]) -> None:
     """Выводит таблицу источников."""
     if not chunks:
@@ -312,6 +389,7 @@ def answer_question(
     db_name: str,
     n_results: int = 5,
     expand_context: bool = True,
+    temperature: Optional[float] = None,
 ) -> None:
     """Отвечает на научный вопрос с цитированием.
 
@@ -320,8 +398,9 @@ def answer_question(
         db_name: Имя базы данных для поиска
         n_results: Количество результатов
         expand_context: Расширять контекст соседними чанками
+        temperature: Температура для генерации (опционально)
     """
-    llm = create_llm()
+    llm = create_llm(temperature=temperature)
 
     initial_chunks, query_type, confidence = retrieve_with_reranking(
         question, db_name, n_results, fetch_multiplier=2
@@ -402,6 +481,7 @@ def review_topic(
     db_name: str,
     n_results: int = 15,
     sections: Optional[list[str]] = None,
+    temperature: Optional[float] = None,
 ) -> None:
     """Генерирует обзор литературы по теме.
 
@@ -410,8 +490,9 @@ def review_topic(
         db_name: Имя базы данных для поиска
         n_results: Количество результатов
         sections: Список секций для фильтрации (опционально)
+        temperature: Температура для генерации (опционально)
     """
-    llm = create_llm()
+    llm = create_llm(temperature=temperature)
     query_type = detect_query_type(topic)
 
     if sections:

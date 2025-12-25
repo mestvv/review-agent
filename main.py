@@ -114,7 +114,8 @@ def cmd_stats(db: Optional[str]):
 @click.option("--question", "-q", default=None, help="Вопрос для ответа")
 @click.option("--n-results", "-n", default=5, help="Количество чанков для поиска")
 @click.option("--db", "-d", default=None, help="Имя БД для поиска")
-def cmd_ask(question: Optional[str], n_results: int, db: Optional[str]):
+@click.option("--temperature", "-t", default=None, type=float, help="Температура генерации (0.0-2.0)")
+def cmd_ask(question: Optional[str], n_results: int, db: Optional[str], temperature: Optional[float]):
     """Ответ на вопрос по научной литературе."""
     from src.agent import answer_question
 
@@ -127,14 +128,15 @@ def cmd_ask(question: Optional[str], n_results: int, db: Optional[str]):
     if not question:
         question = click.prompt("Ваш вопрос")
 
-    answer_question(question, db_name, n_results=n_results)
+    answer_question(question, db_name, n_results=n_results, temperature=temperature)
 
 
 @cli.command("review")
 @click.option("--topic", "-t", default=None, help="Тема для обзора литературы")
 @click.option("--n-results", "-n", default=15, help="Количество чанков для поиска")
 @click.option("--db", "-d", default=None, help="Имя БД для поиска")
-def cmd_review(topic: Optional[str], n_results: int, db: Optional[str]):
+@click.option("--temperature", default=None, type=float, help="Температура генерации (0.0-2.0)")
+def cmd_review(topic: Optional[str], n_results: int, db: Optional[str], temperature: Optional[float]):
     """Обзор литературы по теме."""
     from src.agent import review_topic
 
@@ -147,7 +149,7 @@ def cmd_review(topic: Optional[str], n_results: int, db: Optional[str]):
     if not topic:
         topic = click.prompt("Тема обзора")
 
-    review_topic(topic, db_name, n_results=n_results)
+    review_topic(topic, db_name, n_results=n_results, temperature=temperature)
 
 
 @cli.command("search")

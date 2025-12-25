@@ -8,7 +8,13 @@ from typing import Optional
 
 import streamlit as st
 
-from src.agent.agent import create_llm
+from src.agent.agent import (
+    create_llm,
+    stream_llm_answer_qa,
+    stream_llm_answer_review,
+    _save_response_to_json,
+    _save_to_markdown,
+)
 from src.agent.prompts import QA_PROMPT, REVIEW_PROMPT
 from src.config import (
     list_existing_dbs,
@@ -17,6 +23,7 @@ from src.config import (
     CHUNKS_LOG_DIR,
     EXPAND_WINDOW,
     EXPAND_TOP_N,
+    LLM_TEMPERATURE,
 )
 from src.rag import (
     index_all_pdfs,
@@ -119,6 +126,26 @@ def _format_confidence_dict(confidence: ConfidenceScore) -> dict:
     }
 
 
+def _create_response_object(content: str):
+    """Создает объект-обертку для ответа LLM из строки.
+
+    Args:
+        content: Содержимое ответа
+
+    Returns:
+        Объект с методом dict() для совместимости с _save_response_to_json
+    """
+
+    class ResponseWrapper:
+        def __init__(self, content: str):
+            self.content = content
+
+        def dict(self):
+            return {"content": self.content}
+
+    return ResponseWrapper(content)
+
+
 def _format_confidence_for_prompt(confidence: ConfidenceScore, query_type: str) -> str:
     """Форматирует confidence для промпта."""
     level_text = {
@@ -143,15 +170,30 @@ def answer_question_web(
     db_name: str,
     n_results: int = 5,
     expand_context: bool = True,
+    temperature: Optional[float] = None,
+    streaming: bool = False,
 ):
-    """Отвечает на вопрос и возвращает результат для веб-интерфейса."""
-    llm = create_llm()
+    """Отвечает на вопрос и возвращает результат для веб-интерфейса.
 
+    Args:
+        question: Вопрос
+        db_name: Имя базы данных
+        n_results: Количество результатов
+        expand_context: Расширять контекст
+        temperature: Температура генерации
+        streaming: Использовать потоковый вывод (возвращает генератор)
+
+    Returns:
+        Если streaming=False: словарь с результатами
+        Если streaming=True: генератор токенов и метаданные
+    """
     initial_chunks, query_type, confidence = retrieve_with_reranking(
         question, db_name, n_results, fetch_multiplier=2
     )
 
     if not initial_chunks:
+        if streaming:
+            return None, {"success": False, "error": "Релевантный контекст не найден"}
         return {
             "success": False,
             "error": "Релевантный контекст не найден",
@@ -184,14 +226,6 @@ def answer_question_web(
     context = format_context_with_citations(chunks[:10])
     confidence_info = _format_confidence_for_prompt(confidence, query_type)
 
-    response = (QA_PROMPT | llm).invoke(
-        {
-            "question": question,
-            "context": context,
-            "confidence_info": confidence_info,
-        }
-    )
-
     # Форматируем источники
     sources = {}
     for chunk in chunks:
@@ -213,23 +247,96 @@ def answer_question_web(
             }
         )
 
-    return {
+    metadata = {
         "success": True,
-        "answer": response.content,
         "confidence": _format_confidence_dict(confidence),
         "query_type": query_type,
         "sources": sources_list,
         "chunks_count": len(chunks),
     }
 
+    if streaming:
+        # Возвращаем генератор и метаданные
+        # Используем список для хранения полного ответа (чтобы обновить метаданные)
+        full_answer_container = [""]
+
+        def answer_generator():
+            for token in stream_llm_answer_qa(
+                question, context, confidence_info, temperature
+            ):
+                full_answer_container[0] += token
+                yield token
+            # Сохраняем полный ответ после завершения
+            full_answer = full_answer_container[0]
+            metadata["answer"] = full_answer
+
+            # Сохраняем логи после завершения генерации
+            query_data = {
+                "question": question,
+                "context": context,
+                "confidence": confidence.to_dict(),
+            }
+            response_obj = _create_response_object(full_answer)
+            _save_response_to_json(query_data, response_obj)
+            _save_to_markdown(
+                query=question,
+                response_content=full_answer,
+                chunks=chunks,
+                query_type="ask",
+                confidence=confidence,
+            )
+
+        return answer_generator(), metadata
+    else:
+        # Обычный режим без streaming
+        llm = create_llm(temperature=temperature)
+        response = (QA_PROMPT | llm).invoke(
+            {
+                "question": question,
+                "context": context,
+                "confidence_info": confidence_info,
+            }
+        )
+        metadata["answer"] = response.content
+
+        # Сохраняем логи
+        query_data = {
+            "question": question,
+            "context": context,
+            "confidence": confidence.to_dict(),
+        }
+        _save_response_to_json(query_data, response)
+        _save_to_markdown(
+            query=question,
+            response_content=response.content,
+            chunks=chunks,
+            query_type="ask",
+            confidence=confidence,
+        )
+
+        return metadata
+
 
 def review_topic_web(
     topic: str,
     db_name: str,
     n_results: int = 15,
+    temperature: Optional[float] = None,
+    streaming: bool = False,
 ):
-    """Создает обзор литературы и возвращает результат для веб-интерфейса."""
-    llm = create_llm()
+    """Создает обзор литературы и возвращает результат для веб-интерфейса.
+
+    Args:
+        topic: Тема обзора
+        db_name: Имя базы данных
+        n_results: Количество результатов
+        temperature: Температура генерации
+        streaming: Использовать потоковый вывод (возвращает генератор)
+
+    Returns:
+        Если streaming=False: словарь с результатами
+        Если streaming=True: генератор токенов и метаданные
+    """
     from src.rag.retriever import detect_query_type
 
     query_type = detect_query_type(topic)
@@ -238,6 +345,8 @@ def review_topic_web(
     )
 
     if not all_chunks:
+        if streaming:
+            return None, {"success": False, "error": "Нет данных для обзора"}
         return {
             "success": False,
             "error": "Нет данных для обзора",
@@ -256,15 +365,6 @@ def review_topic_web(
             seen.add(chunk.file_name)
 
     confidence_info = _format_confidence_for_prompt(confidence, query_type)
-
-    response = (REVIEW_PROMPT | llm).invoke(
-        {
-            "topic": topic,
-            "context": context[:8000],
-            "sources": "\n".join(sources_detail),
-            "confidence_info": confidence_info,
-        }
-    )
 
     # Форматируем источники
     sources = {}
@@ -287,14 +387,79 @@ def review_topic_web(
             }
         )
 
-    return {
+    metadata = {
         "success": True,
-        "review": response.content,
         "confidence": _format_confidence_dict(confidence),
         "query_type": query_type,
         "sources": sources_list,
         "chunks_count": len(all_chunks),
     }
+
+    if streaming:
+        # Возвращаем генератор и метаданные
+        # Используем список для хранения полного обзора (чтобы обновить метаданные)
+        full_review_container = [""]
+
+        def review_generator():
+            for token in stream_llm_answer_review(
+                topic,
+                context[:8000],
+                "\n".join(sources_detail),
+                confidence_info,
+                temperature,
+            ):
+                full_review_container[0] += token
+                yield token
+            # Сохраняем полный обзор после завершения
+            full_review = full_review_container[0]
+            metadata["review"] = full_review
+
+            # Сохраняем логи после завершения генерации
+            query_data = {
+                "topic": topic,
+                "context": context[:8000],
+                "confidence": confidence.to_dict(),
+            }
+            response_obj = _create_response_object(full_review)
+            _save_response_to_json(query_data, response_obj)
+            _save_to_markdown(
+                query=topic,
+                response_content=full_review,
+                chunks=all_chunks,
+                query_type="review",
+                confidence=confidence,
+            )
+
+        return review_generator(), metadata
+    else:
+        # Обычный режим без streaming
+        llm = create_llm(temperature=temperature)
+        response = (REVIEW_PROMPT | llm).invoke(
+            {
+                "topic": topic,
+                "context": context[:8000],
+                "sources": "\n".join(sources_detail),
+                "confidence_info": confidence_info,
+            }
+        )
+        metadata["review"] = response.content
+
+        # Сохраняем логи
+        query_data = {
+            "topic": topic,
+            "context": context[:8000],
+            "confidence": confidence.to_dict(),
+        }
+        _save_response_to_json(query_data, response)
+        _save_to_markdown(
+            query=topic,
+            response_content=response.content,
+            chunks=all_chunks,
+            query_type="review",
+            confidence=confidence,
+        )
+
+        return metadata
 
 
 def get_stats_dict(db_name: Optional[str] = None) -> dict:
@@ -452,60 +617,82 @@ else:
         with col2:
             expand_context = st.checkbox("Расширять контекст", value=True)
 
+        temperature = st.slider(
+            "Temperature",
+            min_value=0.0,
+            max_value=2.0,
+            value=LLM_TEMPERATURE,
+            step=0.1,
+            help="Температура генерации: низкие значения делают ответы более детерминированными, высокие - более креативными",
+            key="ask_temperature",
+        )
+
         if st.button("Отправить вопрос", type="primary", use_container_width=True):
             if question:
-                with st.spinner("Обработка вопроса..."):
-                    result = answer_question_web(
-                        question,
-                        selected_db,
-                        n_results=n_results,
-                        expand_context=expand_context,
-                    )
+                # Получаем генератор и метаданные для потокового вывода
+                answer_gen, metadata = answer_question_web(
+                    question,
+                    selected_db,
+                    n_results=n_results,
+                    expand_context=expand_context,
+                    temperature=temperature,
+                    streaming=True,
+                )
 
-                    if result["success"]:
-                        # Отображение уверенности
-                        confidence = result["confidence"]
-                        level_colors = {
-                            "Высокая": "🟢",
-                            "Средняя": "🟡",
-                            "Низкая": "🟠",
-                            "Очень низкая": "🔴",
-                        }
-                        icon = level_colors.get(confidence["level"], "⚪")
+                if metadata and metadata.get("success"):
+                    # Отображение уверенности
+                    confidence = metadata["confidence"]
+                    level_colors = {
+                        "Высокая": "🟢",
+                        "Средняя": "🟡",
+                        "Низкая": "🟠",
+                        "Очень низкая": "🔴",
+                    }
+                    icon = level_colors.get(confidence["level"], "⚪")
 
+                    st.markdown("---")
+                    st.markdown(f"### {icon} Уверенность: {confidence['level']}")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Источников", confidence["num_sources"])
+                    with col2:
+                        st.metric("Чанков", confidence["num_chunks"])
+                    with col3:
+                        st.metric(
+                            "Средняя дистанция", f"{confidence['avg_distance']:.3f}"
+                        )
+
+                    # Потоковый вывод ответа
+                    st.markdown("---")
+                    st.markdown("### Ответ")
+
+                    # Используем st.write_stream для потокового вывода
+                    # st.write_stream автоматически обновляет UI по мере поступления токенов
+                    full_answer = st.write_stream(answer_gen)
+
+                    # Полный ответ уже сохранен в metadata через генератор
+
+                    # Источники
+                    if metadata.get("sources"):
                         st.markdown("---")
-                        st.markdown(f"### {icon} Уверенность: {confidence['level']}")
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Источников", confidence["num_sources"])
-                        with col2:
-                            st.metric("Чанков", confidence["num_chunks"])
-                        with col3:
-                            st.metric(
-                                "Средняя дистанция", f"{confidence['avg_distance']:.3f}"
+                        st.markdown("### Использованные источники")
+                        for source in metadata["sources"]:
+                            pages_str = ", ".join(map(str, source["pages"]))
+                            sections_str = (
+                                ", ".join(source["sections"])
+                                if source["sections"]
+                                else "—"
                             )
-
-                        # Ответ
-                        st.markdown("---")
-                        st.markdown("### Ответ")
-                        st.markdown(result["answer"])
-
-                        # Источники
-                        if result["sources"]:
-                            st.markdown("---")
-                            st.markdown("### Использованные источники")
-                            for source in result["sources"]:
-                                pages_str = ", ".join(map(str, source["pages"]))
-                                sections_str = (
-                                    ", ".join(source["sections"])
-                                    if source["sections"]
-                                    else "—"
-                                )
-                                with st.expander(f"📄 {source['file_name']}"):
-                                    st.write(f"**Страницы:** {pages_str}")
-                                    st.write(f"**Секции:** {sections_str}")
-                    else:
-                        st.error(result.get("error", "Произошла ошибка"))
+                            with st.expander(f"📄 {source['file_name']}"):
+                                st.write(f"**Страницы:** {pages_str}")
+                                st.write(f"**Секции:** {sections_str}")
+                else:
+                    error_msg = (
+                        metadata.get("error", "Произошла ошибка")
+                        if metadata
+                        else "Произошла ошибка"
+                    )
+                    st.error(error_msg)
             else:
                 st.warning("Введите вопрос")
 
@@ -518,61 +705,82 @@ else:
             height=100,
         )
 
-        n_results = st.slider("Количество чанков", 5, 30, 15)
+        col1, col2 = st.columns(2)
+        with col1:
+            n_results = st.slider("Количество чанков", 5, 30, 15)
+        with col2:
+            temperature = st.slider(
+                "Temperature",
+                min_value=0.0,
+                max_value=2.0,
+                value=LLM_TEMPERATURE,
+                step=0.1,
+                help="Температура генерации: низкие значения делают ответы более детерминированными, высокие - более креативными",
+                key="review_temperature",
+            )
 
         if st.button("Создать обзор", type="primary", use_container_width=True):
             if topic:
-                with st.spinner("Создание обзора литературы..."):
-                    result = review_topic_web(
-                        topic,
-                        selected_db,
-                        n_results=n_results,
-                    )
+                # Получаем генератор и метаданные для потокового вывода
+                review_gen, metadata = review_topic_web(
+                    topic,
+                    selected_db,
+                    n_results=n_results,
+                    temperature=temperature,
+                    streaming=True,
+                )
 
-                    if result["success"]:
-                        # Отображение уверенности
-                        confidence = result["confidence"]
-                        level_colors = {
-                            "Высокая": "🟢",
-                            "Средняя": "🟡",
-                            "Низкая": "🟠",
-                            "Очень низкая": "🔴",
-                        }
-                        icon = level_colors.get(confidence["level"], "⚪")
+                if metadata and metadata.get("success"):
+                    # Отображение уверенности
+                    confidence = metadata["confidence"]
+                    level_colors = {
+                        "Высокая": "🟢",
+                        "Средняя": "🟡",
+                        "Низкая": "🟠",
+                        "Очень низкая": "🔴",
+                    }
+                    icon = level_colors.get(confidence["level"], "⚪")
 
+                    st.markdown("---")
+                    st.markdown(f"### {icon} Уверенность: {confidence['level']}")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Источников", confidence["num_sources"])
+                    with col2:
+                        st.metric("Чанков", confidence["num_chunks"])
+                    with col3:
+                        st.metric(
+                            "Средняя дистанция", f"{confidence['avg_distance']:.3f}"
+                        )
+
+                    # Потоковый вывод обзора
+                    st.markdown("---")
+                    st.markdown("### Обзор литературы")
+
+                    # Используем st.write_stream для потокового вывода
+                    full_review = st.write_stream(review_gen)
+
+                    # Источники
+                    if metadata.get("sources"):
                         st.markdown("---")
-                        st.markdown(f"### {icon} Уверенность: {confidence['level']}")
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Источников", confidence["num_sources"])
-                        with col2:
-                            st.metric("Чанков", confidence["num_chunks"])
-                        with col3:
-                            st.metric(
-                                "Средняя дистанция", f"{confidence['avg_distance']:.3f}"
+                        st.markdown("### Использованные источники")
+                        for source in metadata["sources"]:
+                            pages_str = ", ".join(map(str, source["pages"]))
+                            sections_str = (
+                                ", ".join(source["sections"])
+                                if source["sections"]
+                                else "—"
                             )
-
-                        # Обзор
-                        st.markdown("---")
-                        st.markdown("### Обзор литературы")
-                        st.markdown(result["review"])
-
-                        # Источники
-                        if result["sources"]:
-                            st.markdown("---")
-                            st.markdown("### Использованные источники")
-                            for source in result["sources"]:
-                                pages_str = ", ".join(map(str, source["pages"]))
-                                sections_str = (
-                                    ", ".join(source["sections"])
-                                    if source["sections"]
-                                    else "—"
-                                )
-                                with st.expander(f"📄 {source['file_name']}"):
-                                    st.write(f"**Страницы:** {pages_str}")
-                                    st.write(f"**Секции:** {sections_str}")
-                    else:
-                        st.error(result.get("error", "Произошла ошибка"))
+                            with st.expander(f"📄 {source['file_name']}"):
+                                st.write(f"**Страницы:** {pages_str}")
+                                st.write(f"**Секции:** {sections_str}")
+                else:
+                    error_msg = (
+                        metadata.get("error", "Произошла ошибка")
+                        if metadata
+                        else "Произошла ошибка"
+                    )
+                    st.error(error_msg)
             else:
                 st.warning("Введите тему обзора")
 
