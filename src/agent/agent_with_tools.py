@@ -22,7 +22,7 @@ from src.config import (
     LLM_API_KEY,
     LLM_TEMPERATURE,
 )
-from src.agent.tools import ALL_TOOLS
+from src.agent.tools import ALL_TOOLS, reset_agent_session_dir
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -80,15 +80,20 @@ def create_agent_llm(temperature: Optional[float] = None) -> ChatOpenAI:
     )
 
 
-def create_rag_agent(temperature: Optional[float] = None):
+def create_rag_agent(temperature: Optional[float] = None, new_session: bool = True):
     """Создаёт ReAct агента с инструментами для работы с RAG.
 
     Args:
         temperature: Температура для генерации (опционально)
+        new_session: Создать новую сессию для логирования чанков (по умолчанию True)
 
     Returns:
         Скомпилированный LangGraph агент
     """
+    # Сбрасываем директорию сессии для новой сессии агента
+    if new_session:
+        reset_agent_session_dir()
+
     llm = create_agent_llm(temperature)
 
     agent = create_react_agent(

@@ -20,8 +20,9 @@ from src.agent.agent_with_tools import (
     _save_chat_session_to_json,
     _save_chat_session_to_markdown,
 )
+from src.agent.tools import reset_agent_session_dir
 from src.agent.prompts import QA_PROMPT, REVIEW_PROMPT
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from src.config import (
     list_existing_dbs,
     list_available_dbs,
@@ -613,7 +614,12 @@ if not selected_db:
 else:
     # Вкладки для разных функций
     tab1, tab2, tab3, tab4 = st.tabs(
-        ["💬 Задать вопрос", "📝 Обзор литературы", "🔍 Поиск чанков", "🤖 Чат с агентом"]
+        [
+            "💬 Задать вопрос",
+            "📝 Обзор литературы",
+            "🔍 Поиск чанков",
+            "🤖 Чат с агентом",
+        ]
     )
 
     with tab1:
@@ -862,6 +868,12 @@ else:
                 help="Температура генерации",
                 key="agent_temperature",
             )
+            show_thinking = st.checkbox(
+                "🧠 Показывать ход мыслей агента",
+                value=True,
+                help="Показывать промежуточные шаги: вызовы инструментов и их результаты",
+                key="show_thinking",
+            )
 
         # Кнопки управления
         col1, col2, col3 = st.columns(3)
@@ -871,6 +883,7 @@ else:
                 st.session_state.chat_history = []
                 st.session_state.chat_agent = None
                 st.session_state.chat_session_start = None
+                reset_agent_session_dir()  # Сбрасываем директорию логов
                 st.rerun()
         with col2:
             if st.button("💾 Сохранить сессию", use_container_width=True):
@@ -885,7 +898,9 @@ else:
                         selected_db,
                         st.session_state.chat_session_start or datetime.now(),
                     )
-                    st.success(f"Сессия сохранена ({len(st.session_state.chat_history)} обменов)")
+                    st.success(
+                        f"Сессия сохранена ({len(st.session_state.chat_history)} обменов)"
+                    )
                 else:
                     st.warning("История пуста")
         with col3:
@@ -902,8 +917,24 @@ else:
                     st.markdown(exchange["question"])
                 # Ответ агента
                 with st.chat_message("assistant"):
+                    # Показываем промежуточные шаги если есть и включен показ
+                    if show_thinking and exchange.get("steps"):
+                        with st.expander("🧠 Ход мыслей агента", expanded=False):
+                            for step in exchange["steps"]:
+                                if step["type"] == "thinking":
+                                    st.info(f"💭 **Мысли:** {step['content'][:500]}...")
+                                elif step["type"] == "tool_call":
+                                    st.warning(
+                                        f"🔧 **Вызов инструмента:** `{step['tool_name']}`\n\n**Аргументы:** ```{step['args']}```"
+                                    )
+                                elif step["type"] == "tool_result":
+                                    st.success(
+                                        f"📋 **Результат `{step['tool_name']}`:**\n\n{step['content'][:1000]}..."
+                                    )
                     st.markdown(exchange["response"])
-                    st.caption(f"🔧 Вызовов инструментов: {exchange['tool_calls_count']}")
+                    st.caption(
+                        f"🔧 Вызовов инструментов: {exchange['tool_calls_count']}"
+                    )
 
         # Поле ввода нового сообщения
         if prompt := st.chat_input("Задайте вопрос агенту..."):
@@ -920,46 +951,131 @@ else:
             user_message = f"[Используй базу данных: {selected_db}]\n\n{prompt}"
             st.session_state.chat_messages.append(HumanMessage(content=user_message))
 
-            # Получаем ответ от агента
+            # Получаем ответ от агента с отслеживанием шагов
             with st.chat_message("assistant"):
-                with st.spinner("Агент думает..."):
-                    try:
-                        result = st.session_state.chat_agent.invoke(
-                            {"messages": st.session_state.chat_messages}
-                        )
+                steps = []  # Промежуточные шаги
+                steps_placeholder = st.empty()  # Placeholder для обновления шагов
+                final_response = ""
+                tool_calls_count = 0
 
-                        # Обновляем историю сообщений
-                        st.session_state.chat_messages = result["messages"]
+                try:
+                    # Используем stream для получения промежуточных результатов
+                    for event in st.session_state.chat_agent.stream(
+                        {"messages": st.session_state.chat_messages},
+                        stream_mode="values",
+                    ):
+                        messages = event.get("messages", [])
+                        if not messages:
+                            continue
 
-                        # Считаем вызовы инструментов
-                        tool_calls_count = sum(
-                            len(msg.tool_calls)
-                            if hasattr(msg, "tool_calls") and msg.tool_calls
-                            else 0
-                            for msg in st.session_state.chat_messages
-                        )
+                        last_msg = messages[-1]
 
-                        # Получаем последний ответ
-                        final_response = ""
-                        for msg in reversed(st.session_state.chat_messages):
-                            if isinstance(msg, AIMessage) and msg.content:
-                                if not (hasattr(msg, "tool_calls") and msg.tool_calls):
-                                    final_response = msg.content
-                                    break
+                        # Обрабатываем сообщения от AI с tool_calls
+                        if isinstance(last_msg, AIMessage):
+                            # Если есть контент (мысли агента перед вызовом инструмента)
+                            if (
+                                last_msg.content
+                                and hasattr(last_msg, "tool_calls")
+                                and last_msg.tool_calls
+                            ):
+                                steps.append(
+                                    {
+                                        "type": "thinking",
+                                        "content": last_msg.content,
+                                    }
+                                )
 
-                        # Отображаем ответ
-                        st.markdown(final_response)
-                        st.caption(f"🔧 Вызовов инструментов: {tool_calls_count}")
+                            # Если есть вызовы инструментов
+                            if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                                for tc in last_msg.tool_calls:
+                                    tool_calls_count += 1
+                                    steps.append(
+                                        {
+                                            "type": "tool_call",
+                                            "tool_name": tc["name"],
+                                            "args": json.dumps(
+                                                tc["args"], ensure_ascii=False, indent=2
+                                            ),
+                                        }
+                                    )
 
-                        # Сохраняем в историю для логирования
-                        st.session_state.chat_history.append({
+                            # Финальный ответ (без tool_calls)
+                            if last_msg.content and not (
+                                hasattr(last_msg, "tool_calls") and last_msg.tool_calls
+                            ):
+                                final_response = last_msg.content
+
+                        # Обрабатываем результаты инструментов
+                        elif isinstance(last_msg, ToolMessage):
+                            steps.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_name": (
+                                        last_msg.name
+                                        if hasattr(last_msg, "name")
+                                        else "unknown"
+                                    ),
+                                    "content": last_msg.content,
+                                }
+                            )
+
+                        # Обновляем отображение шагов в реальном времени
+                        if show_thinking and steps:
+                            with steps_placeholder.container():
+                                with st.expander("🧠 Ход мыслей агента", expanded=True):
+                                    for step in steps:
+                                        if step["type"] == "thinking":
+                                            st.info(
+                                                f"💭 **Мысли:** {step['content'][:500]}{'...' if len(step['content']) > 500 else ''}"
+                                            )
+                                        elif step["type"] == "tool_call":
+                                            st.warning(
+                                                f"🔧 **Вызов инструмента:** `{step['tool_name']}`\n\n**Аргументы:**\n```json\n{step['args']}\n```"
+                                            )
+                                        elif step["type"] == "tool_result":
+                                            content_preview = step["content"][:1000]
+                                            st.success(
+                                                f"📋 **Результат `{step['tool_name']}`:**\n\n{content_preview}{'...' if len(step['content']) > 1000 else ''}"
+                                            )
+
+                    # Обновляем историю сообщений из последнего события
+                    st.session_state.chat_messages = messages
+
+                    # Сворачиваем expander после завершения
+                    if show_thinking and steps:
+                        with steps_placeholder.container():
+                            with st.expander("🧠 Ход мыслей агента", expanded=False):
+                                for step in steps:
+                                    if step["type"] == "thinking":
+                                        st.info(
+                                            f"💭 **Мысли:** {step['content'][:500]}{'...' if len(step['content']) > 500 else ''}"
+                                        )
+                                    elif step["type"] == "tool_call":
+                                        st.warning(
+                                            f"🔧 **Вызов инструмента:** `{step['tool_name']}`\n\n**Аргументы:**\n```json\n{step['args']}\n```"
+                                        )
+                                    elif step["type"] == "tool_result":
+                                        content_preview = step["content"][:1000]
+                                        st.success(
+                                            f"📋 **Результат `{step['tool_name']}`:**\n\n{content_preview}{'...' if len(step['content']) > 1000 else ''}"
+                                        )
+
+                    # Отображаем финальный ответ
+                    st.markdown(final_response)
+                    st.caption(f"🔧 Вызовов инструментов: {tool_calls_count}")
+
+                    # Сохраняем в историю для логирования (включая шаги)
+                    st.session_state.chat_history.append(
+                        {
                             "question": prompt,
                             "response": final_response,
                             "tool_calls_count": tool_calls_count,
                             "timestamp": datetime.now().isoformat(),
                             "messages_in_context": len(st.session_state.chat_messages),
-                        })
+                            "steps": steps,  # Сохраняем шаги
+                        }
+                    )
 
-                    except Exception as e:
-                        st.error(f"Ошибка: {e}")
-                        logging.exception("Ошибка в чате с агентом")
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
+                    logging.exception("Ошибка в чате с агентом")

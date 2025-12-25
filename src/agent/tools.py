@@ -1,11 +1,16 @@
 """Инструменты для RAG-агента."""
 
+import json
 import logging
-from typing import Optional
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Any
 
+import numpy as np
 from langchain_core.tools import tool
 
-from src.config import list_existing_dbs
+from src.config import list_existing_dbs, CHUNKS_LOG_DIR
 from src.rag.retriever import (
     retrieve_with_reranking,
     retrieve_chunks,
@@ -13,9 +18,143 @@ from src.rag.retriever import (
     format_context_with_citations,
     RetrievedChunk,
     ConfidenceLevel,
+    ConfidenceScore,
 )
 
 logger = logging.getLogger(__name__)
+
+# Глобальная переменная для хранения текущей директории сессии агента
+_current_agent_session_dir: Optional[Path] = None
+
+
+def _get_agent_session_dir() -> Path:
+    """Получить или создать директорию для текущей сессии агента."""
+    global _current_agent_session_dir
+    if _current_agent_session_dir is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _current_agent_session_dir = CHUNKS_LOG_DIR / f"{timestamp}_agent"
+        _current_agent_session_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "📁 Создана директория для логов агента: %s", _current_agent_session_dir
+        )
+    return _current_agent_session_dir
+
+
+def reset_agent_session_dir() -> None:
+    """Сбросить директорию сессии агента (для новой сессии)."""
+    global _current_agent_session_dir
+    _current_agent_session_dir = None
+
+
+def _convert_numpy_types(obj: Any) -> Any:
+    """Рекурсивно преобразует numpy типы в стандартные Python типы для JSON сериализации.
+
+    Args:
+        obj: Объект для преобразования
+
+    Returns:
+        Объект с преобразованными типами
+    """
+    if isinstance(obj, (np.integer, np.floating)):
+        return float(obj) if isinstance(obj, np.floating) else int(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: _convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, set):
+        return {_convert_numpy_types(item) for item in obj}
+    else:
+        return obj
+
+
+def _save_agent_chunks(
+    chunks: list[RetrievedChunk],
+    query: str,
+    tool_name: str,
+    confidence: Optional[ConfidenceScore] = None,
+    query_type: Optional[str] = None,
+    expanded_chunks: Optional[list[RetrievedChunk]] = None,
+) -> str:
+    """Сохраняет чанки, полученные агентом, в JSON файл.
+
+    Args:
+        chunks: Список найденных чанков
+        query: Поисковый запрос
+        tool_name: Имя инструмента
+        confidence: Оценка уверенности
+        query_type: Тип запроса
+        expanded_chunks: Список расширенных чанков (если есть)
+
+    Returns:
+        Путь к сохранённому файлу
+    """
+    session_dir = _get_agent_session_dir()
+
+    # Безопасное имя файла из запроса
+    safe_query = re.sub(r"[^\w\s-]", "", query[:50]).strip().replace(" ", "_")
+    timestamp = datetime.now().strftime("%H%M%S")
+    filepath = session_dir / f"{timestamp}_{safe_query}.json"
+
+    # Определяем какие чанки были расширены
+    expanded_ids = set()
+    if expanded_chunks:
+        expanded_ids = {f"{c.file_hash}_{c.chunk_id}" for c in expanded_chunks}
+
+    # Формируем данные о чанках
+    chunks_data = []
+    for chunk in chunks:
+        chunk_key = f"{chunk.file_hash}_{chunk.chunk_id}"
+        chunks_data.append(
+            {
+                "chunk_id": chunk.chunk_id,
+                "file_name": chunk.file_name,
+                "file_hash": chunk.file_hash,
+                "page": chunk.page,
+                "section": chunk.section,
+                "distance": chunk.distance,
+                "reranked_score": chunk.reranked_score,
+                "text": chunk.text,
+                "is_expanded": chunk_key in expanded_ids,
+            }
+        )
+
+    # Формируем итоговые данные
+    data = {
+        "tool_name": tool_name,
+        "query": query,
+        "query_type": query_type,
+        "timestamp": datetime.now().isoformat(),
+        "total_chunks": len(chunks),
+        "expanded_chunks_count": len(expanded_chunks) if expanded_chunks else 0,
+        "sources": sorted(set(c.file_name for c in chunks)),
+        "chunks": chunks_data,
+    }
+
+    # Добавляем информацию о confidence если есть
+    if confidence:
+        data["confidence"] = {
+            "level": confidence.level.value,
+            "score": confidence.score,
+            "avg_distance": confidence.avg_distance,
+            "min_distance": confidence.min_distance,
+            "max_distance": confidence.max_distance,
+            "num_chunks": confidence.num_chunks,
+            "num_sources": confidence.num_sources,
+            "coverage_by_section": confidence.coverage_by_section,
+            "warnings": confidence.warnings,
+        }
+
+    # Преобразуем numpy типы в стандартные Python типы для JSON сериализации
+    data = _convert_numpy_types(data)
+
+    # Сохраняем в файл
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    logger.info("💾 Чанки агента сохранены: %s", filepath)
+    return str(filepath)
 
 
 @tool
@@ -84,6 +223,16 @@ def search_vector_db(
 
     # Форматируем контекст
     context = format_context_with_citations(chunks[:10])
+
+    # Сохраняем чанки в лог
+    _save_agent_chunks(
+        chunks=chunks,
+        query=query,
+        tool_name="search_vector_db",
+        confidence=confidence,
+        query_type=query_type,
+        expanded_chunks=expanded_chunks if expand_context else None,
+    )
 
     # Добавляем информацию об уверенности
     level_text = {
@@ -209,6 +358,14 @@ def search_by_section(
     # Сортируем по distance
     all_chunks.sort(key=lambda c: c.distance)
 
+    # Сохраняем чанки в лог
+    _save_agent_chunks(
+        chunks=all_chunks,
+        query=query,
+        tool_name="search_by_section",
+        query_type=f"sections:{','.join(sections)}",
+    )
+
     # Форматируем результат
     context = format_context_with_citations(all_chunks[:10])
     sources = sorted(set(c.file_name for c in all_chunks))
@@ -242,4 +399,13 @@ ALL_TOOLS = [
     search_vector_db,
     list_available_databases,
     search_by_section,
+]
+
+# Экспортируем вспомогательные функции
+__all__ = [
+    "ALL_TOOLS",
+    "search_vector_db",
+    "list_available_databases",
+    "search_by_section",
+    "reset_agent_session_dir",
 ]

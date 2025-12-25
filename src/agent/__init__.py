@@ -16,6 +16,7 @@ from src.agent.tools import (
     search_vector_db,
     list_available_databases,
     search_by_section,
+    reset_agent_session_dir,
     ALL_TOOLS,
 )
 
@@ -34,5 +35,6 @@ __all__ = [
     "search_vector_db",
     "list_available_databases",
     "search_by_section",
+    "reset_agent_session_dir",
     "ALL_TOOLS",
 ]
