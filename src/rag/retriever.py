@@ -144,13 +144,13 @@ def retrieve_chunks(
     section_filter: Optional[str] = None,
 ) -> list[RetrievedChunk]:
     """Извлекает релевантные чанки из базы.
-    
+
     Args:
         query: Поисковый запрос
         db_name: Имя базы данных
         n_results: Количество результатов
         section_filter: Фильтр по секции (опционально)
-        
+
     Returns:
         Список извлеченных чанков
     """
@@ -196,13 +196,13 @@ def get_neighbor_chunks(
     chunk: RetrievedChunk, db_name: str, window: int = 1, query: Optional[str] = None
 ) -> list[RetrievedChunk]:
     """Извлекает соседние чанки для расширения контекста.
-    
+
     Args:
         chunk: Чанк, для которого ищем соседей
         db_name: Имя базы данных
         window: Размер окна (количество соседних чанков с каждой стороны)
         query: Опциональный запрос для вычисления реального distance
-        
+
     Returns:
         Список соседних чанков
     """
@@ -224,7 +224,7 @@ def get_neighbor_chunks(
     for doc, meta in zip(results["documents"], results["metadatas"]):
         if doc and meta:
             chunk_id_val = meta.get("chunk_id", 0)
-            
+
             # Вычисляем реальное distance, если query передан
             if query and query_embedding is not None:
                 model = _get_embedding_model()
@@ -240,7 +240,7 @@ def get_neighbor_chunks(
                 # Используем большое значение для expanded chunks без реального distance
                 # чтобы они были в конце при сортировке по distance
                 distance = 999.0
-            
+
             neighbors.append(
                 RetrievedChunk(
                     text=doc,
@@ -416,14 +416,14 @@ def retrieve_with_reranking(
     fetch_multiplier: int = 3,
 ) -> tuple[list[RetrievedChunk], str, ConfidenceScore]:
     """Извлекает чанки с re-ranking.
-    
+
     Args:
         query: Поисковый запрос
         db_name: Имя базы данных
         n_results: Количество результатов после re-ranking
         section_filter: Фильтр по секции (опционально)
         fetch_multiplier: Множитель для первичной выборки
-        
+
     Returns:
         Кортеж из списка чанков, типа запроса и оценки уверенности
     """

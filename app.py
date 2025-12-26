@@ -68,6 +68,8 @@ if "chat_session_start" not in st.session_state:
     st.session_state.chat_session_start = None
 if "chat_agent" not in st.session_state:
     st.session_state.chat_agent = None
+if "agent_selected_db" not in st.session_state:
+    st.session_state.agent_selected_db = None  # Выбранная БД для чата с агентом
 
 
 def _save_chunks_to_json(
@@ -859,6 +861,44 @@ else:
 
         # Настройки агента
         with st.expander("⚙️ Настройки", expanded=False):
+            # Выбор базы данных для чата
+            agent_db_options = [None] + existing_dbs if existing_dbs else [None]
+
+            # Определяем начальный индекс
+            if st.session_state.agent_selected_db is None:
+                # Если БД не выбрана, используем selected_db из боковой панели или None
+                initial_db = selected_db if selected_db in existing_dbs else None
+                initial_index = (
+                    agent_db_options.index(initial_db)
+                    if initial_db in agent_db_options
+                    else 0
+                )
+            else:
+                # Используем сохраненное значение
+                initial_index = (
+                    agent_db_options.index(st.session_state.agent_selected_db)
+                    if st.session_state.agent_selected_db in agent_db_options
+                    else 0
+                )
+
+            agent_selected_db = st.selectbox(
+                "База данных для чата",
+                agent_db_options,
+                index=initial_index,
+                help="Выберите базу данных, которую будет использовать агент для поиска информации",
+                key="agent_db_selectbox",
+            )
+
+            # Обновляем состояние при изменении БД
+            st.session_state.agent_selected_db = agent_selected_db
+
+            if agent_selected_db:
+                st.info(f"📚 Используется база данных: **{agent_selected_db}**")
+            else:
+                st.warning("⚠️ Выберите базу данных для работы агента")
+
+            st.markdown("---")
+
             agent_temperature = st.slider(
                 "Temperature",
                 min_value=0.0,
@@ -888,14 +928,15 @@ else:
         with col2:
             if st.button("💾 Сохранить сессию", use_container_width=True):
                 if st.session_state.chat_history:
+                    db_for_save = st.session_state.agent_selected_db or selected_db
                     _save_chat_session_to_json(
                         st.session_state.chat_history,
-                        selected_db,
+                        db_for_save,
                         st.session_state.chat_session_start or datetime.now(),
                     )
                     _save_chat_session_to_markdown(
                         st.session_state.chat_history,
-                        selected_db,
+                        db_for_save,
                         st.session_state.chat_session_start or datetime.now(),
                     )
                     st.success(
@@ -911,33 +952,48 @@ else:
         # Отображение истории чата
         chat_container = st.container()
         with chat_container:
-            for exchange in st.session_state.chat_history:
-                # Сообщение пользователя
-                with st.chat_message("user"):
-                    st.markdown(exchange["question"])
-                # Ответ агента
-                with st.chat_message("assistant"):
-                    # Показываем промежуточные шаги если есть и включен показ
-                    if show_thinking and exchange.get("steps"):
-                        with st.expander("🧠 Ход мыслей агента", expanded=False):
-                            for step in exchange["steps"]:
-                                if step["type"] == "thinking":
-                                    st.info(f"💭 **Мысли:** {step['content'][:500]}...")
-                                elif step["type"] == "tool_call":
-                                    st.warning(
-                                        f"🔧 **Вызов инструмента:** `{step['tool_name']}`\n\n**Аргументы:** ```{step['args']}```"
-                                    )
-                                elif step["type"] == "tool_result":
-                                    st.success(
-                                        f"📋 **Результат `{step['tool_name']}`:**\n\n{step['content'][:1000]}..."
-                                    )
-                    st.markdown(exchange["response"])
-                    st.caption(
-                        f"🔧 Вызовов инструментов: {exchange['tool_calls_count']}"
-                    )
+            if st.session_state.chat_history:
+                for exchange in st.session_state.chat_history:
+                    # Сообщение пользователя
+                    with st.chat_message("user"):
+                        st.markdown(exchange["question"])
+                    # Ответ агента
+                    with st.chat_message("assistant"):
+                        # Показываем промежуточные шаги если есть и включен показ
+                        if show_thinking and exchange.get("steps"):
+                            with st.expander("🧠 Ход мыслей агента", expanded=False):
+                                for step in exchange["steps"]:
+                                    if step["type"] == "thinking":
+                                        st.info(
+                                            f"💭 **Мысли:** {step['content'][:500]}..."
+                                        )
+                                    elif step["type"] == "tool_call":
+                                        st.warning(
+                                            f"🔧 **Вызов инструмента:** `{step['tool_name']}`\n\n**Аргументы:** ```{step['args']}```"
+                                        )
+                                    elif step["type"] == "tool_result":
+                                        st.success(
+                                            f"📋 **Результат `{step['tool_name']}`:**\n\n{step['content'][:1000]}..."
+                                        )
+                        st.markdown(exchange["response"])
+                        st.caption(
+                            f"🔧 Вызовов инструментов: {exchange['tool_calls_count']}"
+                        )
+            else:
+                st.info("💬 Начните диалог, задав вопрос агенту в поле ввода ниже")
 
-        # Поле ввода нового сообщения
+        st.markdown("---")
+
+        # Проверяем, что БД выбрана перед обработкой сообщения
+        current_agent_db = st.session_state.agent_selected_db or selected_db
+
+        # Поле ввода нового сообщения (внизу)
         if prompt := st.chat_input("Задайте вопрос агенту..."):
+            if not current_agent_db:
+                st.error(
+                    "⚠️ Пожалуйста, выберите базу данных в настройках перед отправкой сообщения"
+                )
+                st.stop()
             # Инициализируем агента если нужно
             if st.session_state.chat_agent is None:
                 st.session_state.chat_agent = create_rag_agent(agent_temperature)
@@ -948,7 +1004,7 @@ else:
                 st.markdown(prompt)
 
             # Формируем сообщение с указанием БД
-            user_message = f"[Используй базу данных: {selected_db}]\n\n{prompt}"
+            user_message = f"[Используй базу данных: {current_agent_db}]\n\n{prompt}"
             st.session_state.chat_messages.append(HumanMessage(content=user_message))
 
             # Получаем ответ от агента с отслеживанием шагов
