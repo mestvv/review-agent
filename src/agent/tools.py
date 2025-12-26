@@ -16,6 +16,7 @@ from src.rag.retriever import (
     retrieve_chunks,
     get_neighbor_chunks,
     format_context_with_citations,
+    get_article_titles,
     RetrievedChunk,
     ConfidenceLevel,
     ConfidenceScore,
@@ -198,6 +199,7 @@ def search_vector_db(
         db_name=db_name,
         n_results=n_results,
         section_filter=section_filter,
+        file_name_filter=None,
         fetch_multiplier=3,
     )
 
@@ -318,12 +320,17 @@ def search_by_section(
     Полезно когда нужно найти информацию из разных частей статей:
     например, методы И результаты одновременно.
 
+    ВАЖНО: Секция 'unknown' ВСЕГДА автоматически добавляется к поиску,
+    так как разбивка на секции не всегда происходит корректно.
+    Это гарантирует, что не будут пропущены релевантные фрагменты.
+
     Args:
         query: Поисковый запрос на естественном языке.
         db_name: Имя базы данных для поиска.
         sections: Список секций для поиска.
                  Допустимые значения: 'abstract', 'introduction', 'methods',
                  'results', 'discussion', 'conclusion'.
+                 Секция 'unknown' будет добавлена автоматически, если её нет в списке.
         n_results_per_section: Количество результатов на секцию (по умолчанию 3).
 
     Returns:
@@ -339,15 +346,22 @@ def search_by_section(
         available = ", ".join(existing_dbs) if existing_dbs else "нет доступных БД"
         return f"❌ База данных '{db_name}' не найдена. Доступные БД: {available}"
 
+    # Всегда добавляем секцию 'unknown', если её нет в списке
+    # Это важно, так как разбивка на секции не всегда происходит корректно
+    sections_to_search = list(sections)
+    if "unknown" not in sections_to_search:
+        sections_to_search.append("unknown")
+
     all_chunks: list[RetrievedChunk] = []
     section_results = {}
 
-    for section in sections:
+    for section in sections_to_search:
         chunks = retrieve_chunks(
             query=query,
             db_name=db_name,
             n_results=n_results_per_section,
             section_filter=section,
+            file_name_filter=None,
         )
         section_results[section] = len(chunks)
         all_chunks.extend(chunks)
@@ -363,7 +377,7 @@ def search_by_section(
         chunks=all_chunks,
         query=query,
         tool_name="search_by_section",
-        query_type=f"sections:{','.join(sections)}",
+        query_type=f"sections:{','.join(sections_to_search)}",
     )
 
     # Форматируем результат
@@ -373,7 +387,7 @@ def search_by_section(
     result = f"""📊 РЕЗУЛЬТАТЫ ПОИСКА ПО СЕКЦИЯМ
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Запрос: {query}
-Секции: {', '.join(sections)}
+Секции: {', '.join(sections_to_search)}
 Найдено по секциям: {section_results}
 Всего чанков: {len(all_chunks)}
 Источники: {len(sources)}
@@ -394,11 +408,193 @@ def search_by_section(
     return result
 
 
+@tool
+def list_article_titles(db_name: str) -> str:
+    """Получить список названий всех статей в базе данных.
+
+    Используй этот инструмент, чтобы узнать какие статьи доступны
+    в указанной базе данных. Это поможет выбрать конкретную статью
+    для поиска с фильтром по названию.
+
+    Args:
+        db_name: Имя базы данных для поиска (например, 'climate').
+
+    Returns:
+        Список названий статей с их количеством.
+    """
+    logger.info("🔧 Tool list_article_titles: db_name='%s'", db_name)
+
+    # Проверяем существование БД
+    existing_dbs = list_existing_dbs()
+    if db_name not in existing_dbs:
+        available = ", ".join(existing_dbs) if existing_dbs else "нет доступных БД"
+        return f"❌ База данных '{db_name}' не найдена. Доступные БД: {available}"
+
+    try:
+        titles = get_article_titles(db_name)
+
+        if not titles:
+            return f"❌ В базе данных '{db_name}' не найдено статей."
+
+        result = f"📚 СТАТЬИ В БАЗЕ ДАННЫХ '{db_name}':\n\n"
+        result += f"Всего статей: {len(titles)}\n\n"
+
+        for i, title in enumerate(titles, 1):
+            result += f"{i}. {title}\n"
+
+        result += (
+            "\nИспользуй точное название статьи в инструменте "
+            "search_vector_db_by_article для поиска только в этой статье."
+        )
+
+        logger.info("✅ Tool list_article_titles: найдено %d статей", len(titles))
+        return result
+    except Exception as e:
+        logger.exception("Ошибка в list_article_titles")
+        return f"❌ Ошибка при получении списка статей: {e}"
+
+
+@tool
+def search_vector_db_by_article(
+    query: str,
+    db_name: str,
+    article_title: str,
+    n_results: int = 5,
+    expand_context: bool = True,
+    section_filter: Optional[str] = None,
+) -> str:
+    """Поиск в векторной базе данных с фильтром по названию статьи.
+
+    Используй этот инструмент для поиска информации в конкретной статье.
+    Инструмент возвращает фрагменты текста только из указанной статьи
+    с указанием источников, страниц и секций.
+
+    Args:
+        query: Поисковый запрос на естественном языке.
+               Формулируй максимально конкретно.
+        db_name: Имя базы данных для поиска (например, 'climate').
+                 Доступные БД можно узнать через list_available_databases.
+        article_title: Точное название статьи (файла) для фильтрации.
+                      Список доступных статей можно получить через list_article_titles.
+        n_results: Количество результатов (по умолчанию 5).
+        expand_context: Добавлять соседние чанки для расширения контекста (по умолчанию True).
+        section_filter: Фильтр по секции статьи (опционально).
+                       Возможные значения: 'abstract', 'introduction', 'methods',
+                       'results', 'discussion', 'conclusion'.
+
+    Returns:
+        Форматированный контекст с цитатами и информацией об уверенности.
+    """
+    logger.info(
+        "🔧 Tool search_vector_db_by_article: query='%s...', db='%s', article='%s'",
+        query[:50],
+        db_name,
+        article_title,
+    )
+
+    # Проверяем существование БД
+    existing_dbs = list_existing_dbs()
+    if db_name not in existing_dbs:
+        available = ", ".join(existing_dbs) if existing_dbs else "нет доступных БД"
+        return f"❌ База данных '{db_name}' не найдена. Доступные БД: {available}"
+
+    # Извлекаем чанки с реранкингом и фильтром по названию статьи
+    initial_chunks, query_type, confidence = retrieve_with_reranking(
+        query=query,
+        db_name=db_name,
+        n_results=n_results,
+        section_filter=section_filter,
+        file_name_filter=article_title,
+        fetch_multiplier=3,
+    )
+
+    if not initial_chunks:
+        return (
+            f"❌ Не найдено релевантных фрагментов для запроса: '{query}' "
+            f"в статье '{article_title}'"
+        )
+
+    # Расширяем контекст соседними чанками, если нужно
+    chunks = initial_chunks
+    if expand_context:
+        seen_ids = {f"{c.file_hash}_{c.chunk_id}" for c in initial_chunks}
+        expanded_chunks = []
+
+        # Расширяем топ-3 чанка
+        for chunk in initial_chunks[:3]:
+            neighbors = get_neighbor_chunks(chunk, db_name, window=1, query=query)
+            for n in neighbors:
+                # Проверяем, что соседний чанк из той же статьи
+                if n.file_name == article_title:
+                    key = f"{n.file_hash}_{n.chunk_id}"
+                    if key not in seen_ids:
+                        expanded_chunks.append(n)
+                        seen_ids.add(key)
+
+        chunks = initial_chunks + expanded_chunks
+
+    # Форматируем контекст
+    context = format_context_with_citations(chunks[:10])
+
+    # Сохраняем чанки в лог
+    _save_agent_chunks(
+        chunks=chunks,
+        query=query,
+        tool_name="search_vector_db_by_article",
+        confidence=confidence,
+        query_type=query_type,
+        expanded_chunks=expanded_chunks if expand_context else None,
+    )
+
+    # Добавляем информацию об уверенности
+    level_text = {
+        ConfidenceLevel.HIGH: "ВЫСОКАЯ",
+        ConfidenceLevel.MEDIUM: "СРЕДНЯЯ",
+        ConfidenceLevel.LOW: "НИЗКАЯ",
+        ConfidenceLevel.VERY_LOW: "ОЧЕНЬ НИЗКАЯ",
+    }.get(confidence.level, "НЕИЗВЕСТНА")
+
+    # Собираем уникальные источники
+    sources = sorted(set(c.file_name for c in chunks))
+
+    result = f"""📊 РЕЗУЛЬТАТЫ ПОИСКА В СТАТЬЕ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Запрос: {query}
+Статья: {article_title}
+Тип запроса: {query_type}
+Уверенность: {level_text} (score: {confidence.score:.2f})
+Средняя дистанция: {confidence.avg_distance:.3f}
+Найдено чанков: {len(chunks)}
+Источники: {len(sources)}
+"""
+
+    if confidence.warnings:
+        result += f"⚠️ Предупреждения: {'; '.join(confidence.warnings)}\n"
+
+    result += f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ИСПОЛЬЗОВАННЫЕ ИСТОЧНИКИ:
+{chr(10).join(f'• {s}' for s in sources)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+НАЙДЕННЫЕ ФРАГМЕНТЫ:
+
+{context}
+"""
+
+    logger.info("✅ Tool search_vector_db_by_article: найдено %d чанков", len(chunks))
+    return result
+
+
 # Экспортируем все инструменты
 ALL_TOOLS = [
     search_vector_db,
     list_available_databases,
     search_by_section,
+    list_article_titles,
+    search_vector_db_by_article,
 ]
 
 # Экспортируем вспомогательные функции
@@ -407,5 +603,7 @@ __all__ = [
     "search_vector_db",
     "list_available_databases",
     "search_by_section",
+    "list_article_titles",
+    "search_vector_db_by_article",
     "reset_agent_session_dir",
 ]

@@ -142,6 +142,7 @@ def retrieve_chunks(
     db_name: str,
     n_results: int = 5,
     section_filter: Optional[str] = None,
+    file_name_filter: Optional[str] = None,
 ) -> list[RetrievedChunk]:
     """Извлекает релевантные чанки из базы.
 
@@ -150,6 +151,7 @@ def retrieve_chunks(
         db_name: Имя базы данных
         n_results: Количество результатов
         section_filter: Фильтр по секции (опционально)
+        file_name_filter: Фильтр по названию файла статьи (опционально)
 
     Returns:
         Список извлеченных чанков
@@ -160,7 +162,15 @@ def retrieve_chunks(
     collection = _get_collection(db_name)
 
     embedding = model.encode([query]).tolist()
-    where_filter = {"section": section_filter} if section_filter else None
+
+    # Формируем фильтр where
+    where_filter = {}
+    if section_filter:
+        where_filter["section"] = section_filter
+    if file_name_filter:
+        where_filter["file_name"] = file_name_filter
+
+    where_filter = where_filter if where_filter else None
 
     results = collection.query(
         query_embeddings=embedding,
@@ -413,6 +423,7 @@ def retrieve_with_reranking(
     db_name: str,
     n_results: int = 5,
     section_filter: Optional[str] = None,
+    file_name_filter: Optional[str] = None,
     fetch_multiplier: int = 3,
 ) -> tuple[list[RetrievedChunk], str, ConfidenceScore]:
     """Извлекает чанки с re-ranking.
@@ -422,6 +433,7 @@ def retrieve_with_reranking(
         db_name: Имя базы данных
         n_results: Количество результатов после re-ranking
         section_filter: Фильтр по секции (опционально)
+        file_name_filter: Фильтр по названию файла статьи (опционально)
         fetch_multiplier: Множитель для первичной выборки
 
     Returns:
@@ -432,7 +444,9 @@ def retrieve_with_reranking(
 
     # Используем INITIAL_FETCH_COUNT как минимум, чтобы не пропустить релевантные чанки
     fetch_count = max(n_results * fetch_multiplier, RERANKER_TOP_K, INITIAL_FETCH_COUNT)
-    initial_chunks = retrieve_chunks(query, db_name, fetch_count, section_filter)
+    initial_chunks = retrieve_chunks(
+        query, db_name, fetch_count, section_filter, file_name_filter
+    )
 
     if not initial_chunks:
         return [], query_type, calculate_confidence([], query_type)
@@ -448,3 +462,25 @@ def retrieve_with_reranking(
     logger.info(f"📊 Re-ranking: изменений в топ-{n_results}: {changes}")
 
     return top_chunks, query_type, confidence
+
+
+def get_article_titles(db_name: str) -> list[str]:
+    """Получает список уникальных названий статей из базы данных.
+
+    Args:
+        db_name: Имя базы данных
+
+    Returns:
+        Список уникальных названий файлов статей, отсортированный по алфавиту
+    """
+    collection = _get_collection(db_name)
+
+    # Получаем все метаданные
+    results = collection.get(include=["metadatas"])
+    metadatas = results["metadatas"]
+
+    # Извлекаем уникальные названия файлов
+    titles = sorted(set(meta.get("file_name", "unknown") for meta in metadatas))
+
+    logger.info(f"📚 Найдено {len(titles)} уникальных статей в БД '{db_name}'")
+    return titles
