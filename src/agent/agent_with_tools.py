@@ -21,6 +21,7 @@ from src.config import (
     LLM_BASE_URL,
     LLM_API_KEY,
     LLM_TEMPERATURE,
+    AGENT_RECURSION_LIMIT,
 )
 from src.agent.tools import ALL_TOOLS, reset_agent_session_dir
 
@@ -54,6 +55,7 @@ AGENT_SYSTEM_PROMPT = """Ты эксперт-исследователь в об�
 3. Если информации недостаточно — честно сообщи об этом
 4. Не выдумывай факты, которых нет в найденных фрагментах
 5. При низкой уверенности используй осторожные формулировки
+6. Варьируй структуру предложений: чередуй короткие и длинные, используй сложноподчинённые конструкции. Это нужно, чтобы текст был более интересным и читаемым.
 
 ФОРМАТ ФИНАЛЬНОГО ОТВЕТА:
 После сбора информации дай структурированный ответ:
@@ -103,10 +105,7 @@ def create_rag_agent(temperature: Optional[float] = None, new_session: bool = Tr
     llm = create_agent_llm(temperature)
 
     agent = create_react_agent(
-        model=llm,
-        tools=ALL_TOOLS,
-        prompt=AGENT_SYSTEM_PROMPT,
-        name="rag_agent",
+        model=llm, tools=ALL_TOOLS, prompt=AGENT_SYSTEM_PROMPT, name="rag_agent"
     )
 
     tool_names = ", ".join(t.name for t in ALL_TOOLS)
@@ -303,8 +302,11 @@ def run_agent(
     if db_name:
         user_message = f"[Используй базу данных: {db_name}]\n\n{question}"
 
-    # Запускаем агента
-    result = agent.invoke({"messages": [HumanMessage(content=user_message)]})
+    # Запускаем агента с конфигурацией рекурсии
+    result = agent.invoke(
+        {"messages": [HumanMessage(content=user_message)]},
+        config={"recursion_limit": AGENT_RECURSION_LIMIT},
+    )
 
     messages = result["messages"]
 
@@ -365,10 +367,11 @@ def stream_agent(
     if db_name:
         user_message = f"[Используй базу данных: {db_name}]\n\n{question}"
 
-    # Используем stream для потокового вывода
+    # Используем stream для потокового вывода с конфигурацией рекурсии
     for event in agent.stream(
         {"messages": [HumanMessage(content=user_message)]},
         stream_mode="values",
+        config={"recursion_limit": AGENT_RECURSION_LIMIT},
     ):
         yield event
 
@@ -431,9 +434,12 @@ def chat_with_agent(
 
             messages.append(HumanMessage(content=user_message))
 
-            # Запускаем агента со всей историей
+            # Запускаем агента со всей историей с конфигурацией рекурсии
             console.print()
-            result = agent.invoke({"messages": messages})
+            result = agent.invoke(
+                {"messages": messages},
+                config={"recursion_limit": AGENT_RECURSION_LIMIT},
+            )
 
             # Обновляем историю из результата
             messages = result["messages"]

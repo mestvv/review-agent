@@ -111,6 +111,10 @@ LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.1"))
 # См. https://api-docs.deepseek.com/guides/thinking_mode#tool-calls
 AGENT_LLM_MODEL = os.getenv("AGENT_LLM_MODEL", "deepseek-chat")
 
+# Лимит рекурсии для LangGraph агента
+# Увеличьте это значение, если агент делает много вызовов инструментов
+AGENT_RECURSION_LIMIT = int(os.getenv("AGENT_RECURSION_LIMIT", "30"))
+
 # Section-aware Re-ranking веса
 SECTION_WEIGHTS = {
     "results": {

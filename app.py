@@ -31,6 +31,7 @@ from src.config import (
     EXPAND_WINDOW,
     EXPAND_TOP_N,
     LLM_TEMPERATURE,
+    AGENT_RECURSION_LIMIT,
 )
 from src.rag import (
     index_all_pdfs,
@@ -70,6 +71,10 @@ if "chat_agent" not in st.session_state:
     st.session_state.chat_agent = None
 if "agent_selected_db" not in st.session_state:
     st.session_state.agent_selected_db = None  # Выбранная БД для чата с агентом
+if "agent_recursion_limit" not in st.session_state:
+    st.session_state.agent_recursion_limit = (
+        AGENT_RECURSION_LIMIT  # Лимит рекурсии для агента
+    )
 
 
 def _save_chunks_to_json(
@@ -908,6 +913,19 @@ else:
                 help="Температура генерации",
                 key="agent_temperature",
             )
+
+            agent_recursion_limit = st.slider(
+                "Лимит рекурсии",
+                min_value=10,
+                max_value=200,
+                value=st.session_state.agent_recursion_limit,
+                step=5,
+                help="Максимальное количество шагов, которые может выполнить агент. "
+                "Увеличьте, если агент делает много вызовов инструментов и достигает лимита.",
+                key="agent_recursion_limit",
+            )
+            # Значение автоматически сохраняется в st.session_state.agent_recursion_limit через key
+
             show_thinking = st.checkbox(
                 "🧠 Показывать ход мыслей агента",
                 value=True,
@@ -1013,10 +1031,13 @@ else:
                 tool_calls_count = 0
 
                 try:
-                    # Используем stream для получения промежуточных результатов
+                    # Используем stream для получения промежуточных результатов с конфигурацией рекурсии
                     for event in st.session_state.chat_agent.stream(
                         {"messages": st.session_state.chat_messages},
                         stream_mode="values",
+                        config={
+                            "recursion_limit": st.session_state.agent_recursion_limit
+                        },
                     ):
                         messages = event.get("messages", [])
                         if not messages:
